@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pathlib import Path
 import os
 
@@ -7,7 +7,14 @@ app = FastAPI()
 
 @app.get("/")
 def index():
-    return HTMLResponse(Path("phone.html").read_text(encoding="utf-8"))
+    content = Path("phone.html").read_text(encoding="utf-8")
+    return HTMLResponse(content, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/version")
+def version():
+    p = Path("phone.html")
+    content = p.read_text(encoding="utf-8")
+    return JSONResponse({"size_bytes": len(content.encode()), "has_cpPad": "cpPad" in content, "has_줄선택": "줄선택" in content})
 
 if __name__ == "__main__":
     import uvicorn
