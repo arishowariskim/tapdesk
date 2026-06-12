@@ -77,6 +77,24 @@ async def relay(ws: WebSocket):
             log.info("폰 해제")
 
 
+@app.on_event("startup")
+async def _keepalive():
+    async def _ping():
+        import httpx
+        url = os.environ.get("RENDER_EXTERNAL_URL", "")
+        if not url:
+            return
+        await asyncio.sleep(30)
+        while True:
+            try:
+                async with httpx.AsyncClient() as c:
+                    await c.get(url + "/health", timeout=5)
+            except Exception:
+                pass
+            await asyncio.sleep(600)   # 10분마다 ping → 절대 잠들지 않음
+    asyncio.create_task(_ping())
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
