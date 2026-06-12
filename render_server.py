@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from pathlib import Path
 import os, asyncio, json, logging
 
