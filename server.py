@@ -1774,6 +1774,14 @@ async def ws_endpoint(ws: WebSocket):
             await ws.send_bytes(b)
 
     await send_json({"type": "auth_ok"})
+    # 연결 시 저장된 설정 자동 전송 — 새 오리진(Render)에서 접속해도 동일한 레이아웃 복원
+    try:
+        _settings_file = ROOT / "settings_backup.json"
+        if _settings_file.exists():
+            _settings = json.loads(_settings_file.read_text(encoding="utf-8"))
+            await send_json({"type": "restore_settings", "data": _settings})
+    except Exception as _e:
+        log.warning(f"설정 전송 실패: {_e}")
     # 연결 시 현재 보고 있는 모니터(cur)도 알려줌 → 폰 썸네일 선택이 실제 화면과 일치
     _cur = mss_to_win(STATE["monitor"])
     await send_json({"type": "monitors", "list": monitor_list(),

@@ -1929,6 +1929,16 @@ function onMessage(ev) {
   let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
   if (m.type === "auth_ok") { setStatus(true); sendView(true); send({ type:"lte_mode", on:netLow() }); if (sndOn) send({ type:"audio_mode", on:true }); if (clipWatch) send({ type:"clip_watch", on:true });
     try { if (localStorage.getItem("justReloaded")) { localStorage.removeItem("justReloaded"); setTimeout(() => toast("새로고침", 4000), 700); } } catch(e) {} }   // 새로고침 직후 알림 (연결 완료 후라 안 덮임)
+  else if (m.type === "restore_settings") {
+    try {
+      if (!localStorage.getItem("lsReady") && m.data && typeof m.data === "object") {
+        Object.entries(m.data).forEach(([k,v]) => {
+          localStorage.setItem(k, typeof v === "string" ? v : JSON.stringify(v));
+        });
+        location.reload();
+      }
+    } catch(e) {}
+  }
   else if (m.type === "auth_fail") { setStatus(false); toast("인증 실패"); }
   else if (m.type === "reload") { try { localStorage.setItem("justReloaded","1"); } catch(e) {} location.reload(); }   // 핫리로드 + 새로고침 후 알림용 플래그
   else if (m.type === "rec_stop") { if (m.who !== "phone" && recording) { stopRec(); toast("바탕 마이크로 전환"); } }   // 바탕 버블이 녹음 켜면 폰 녹음 자동 끔 (상호배타)
