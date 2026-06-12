@@ -1927,7 +1927,7 @@ function onMessage(ev) {
     return;
   }
   let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-  if (m.type === "auth_ok") { setStatus(true); sendView(true); send({ type:"lte_mode", on:netLow() }); if (sndOn) send({ type:"audio_mode", on:true }); if (clipWatch) send({ type:"clip_watch", on:true });
+  if (m.type === "auth_ok" || m.type === "relay_ok") { setStatus(true); sendView(true); send({ type:"lte_mode", on:netLow() }); if (sndOn) send({ type:"audio_mode", on:true }); if (clipWatch) send({ type:"clip_watch", on:true });
     try { if (localStorage.getItem("justReloaded")) { localStorage.removeItem("justReloaded"); setTimeout(() => toast("새로고침", 4000), 700); } } catch(e) {} }   // 새로고침 직후 알림 (연결 완료 후라 안 덮임)
   else if (m.type === "restore_settings") {
     try {
