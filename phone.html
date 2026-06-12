@@ -1316,6 +1316,7 @@ function flushFrame() {
 }
 
 let ws = null, monitors = [], curMon = 1;
+let _savedMonTimer = null;   // savedMon 자동복원 타이머 — 수동 선택 시 취소
 let curKey = "";                                   // 서버가 준 현재 모니터 하드웨어 고정 키 (LAP / 모델_UID)
 let slotScope = localStorage.getItem("slotScope") || "global";   // 줌슬롯 저장 방식: "global"(공용 1세트) | "mon"(모니터별)
 function monKey() {
@@ -1534,6 +1535,7 @@ function renderMonEdge() {
         return;
       }
       cancelDrag();
+      if (_savedMonTimer) { clearTimeout(_savedMonTimer); _savedMonTimer = null; }
       send({ type:"monitor_switch", monitor:mon.id, edid:mon.key||"" });
       // 드로어 유지 — active만 즉시 갱신
       curMon = mon.id;
@@ -1622,6 +1624,7 @@ function closeMonEdge() {
   btn.addEventListener("click", () => {
     const m = monitors.find(x => x.id === mid);
     if (!m) { toast("모니터 " + mid + " 없음"); return; }
+    if (_savedMonTimer) { clearTimeout(_savedMonTimer); _savedMonTimer = null; }
     send({ type:"monitor_switch", monitor:mid, edid:m.key||"" });
   });
 });
@@ -1683,6 +1686,7 @@ function bindMonFloat(b, id, rz) {
       // EDID 하드웨어 키 우선 전송 (번호는 환경 바뀌면 딴 모니터를 가리킴). 키 없으면 번호 폴백.
       const mon = monitors.find((x) => x.id === id);
       const ek = (mon && mon.key) ? mon.key : "";
+      if (_savedMonTimer) { clearTimeout(_savedMonTimer); _savedMonTimer = null; }
       send({ type:"monitor_switch", monitor:id, edid:ek });
       toast("모니터 " + id);
     }
@@ -1947,7 +1951,7 @@ function onMessage(ev) {
   else if (m.type === "monitors") { monitors = m.list || []; if (m.cur) { const nk = m.curKey || ((monitors.find(x => x.id === m.cur) || {}).key) || ""; const ch = (m.cur !== curMon) || (nk !== curKey); curMon = m.cur; curKey = nk; if (ch) view = Object.assign({}, curView()); } renderMonBar(); if (typeof markPresets === "function") markPresets(); sendView(true);
     // 저장된 모니터 복원 — 새로고침 후 서버와 다르면 재전환
     const _saved = parseInt(localStorage.getItem("savedMon") || "0");
-    if (_saved && _saved !== curMon) { const _sm = monitors.find(x => x.id === _saved); if (_sm) setTimeout(() => send({ type:"monitor_switch", monitor:_saved, edid:_sm.key||"" }), 400); }
+    if (_saved && _saved !== curMon) { const _sm = monitors.find(x => x.id === _saved); if (_sm) { if (_savedMonTimer) clearTimeout(_savedMonTimer); _savedMonTimer = setTimeout(() => { _savedMonTimer = null; send({ type:"monitor_switch", monitor:_saved, edid:_sm.key||"" }); }, 400); } }
   }   // m.cur/curKey = 서버가 지금 보내는 모니터(하드웨어키) → 그 모니터 줌상태·썸네일·슬롯 동기화
   else if (m.type === "thumbs") {   // 5초 갱신 — hotplug 추종: 목록·현재모니터 동기화
     if (m.list && m.list.length) {
