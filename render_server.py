@@ -1,5 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from pathlib import Path
 import os, asyncio, json, logging
 
@@ -17,6 +17,24 @@ _phone_ws: WebSocket | None = None
 def index():
     content = Path("phone.html").read_text(encoding="utf-8")
     return HTMLResponse(content, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.get("/manifest.json")
+def manifest():
+    return JSONResponse({
+        "name": "TapDesk", "short_name": "TapDesk",
+        "start_url": "/", "display": "fullscreen", "orientation": "any",
+        "background_color": "#05060a", "theme_color": "#05060a",
+        "icons": [{"src": "/icon.png", "sizes": "256x256", "type": "image/png"}],
+    })
+
+
+@app.get("/icon.png")
+def icon():
+    p = Path("icon.png")
+    if p.exists():
+        return FileResponse(str(p), media_type="image/png")
+    return JSONResponse({"error": "no icon"}, status_code=404)
 
 
 @app.get("/health")

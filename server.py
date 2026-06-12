@@ -309,25 +309,21 @@ def get_mss() -> "mss.MSS":
 
 
 # dxcam 싱글턴 (GPU DDA 캡처 — mss 대비 10배 빠름)
+# 주의: dxcam은 output_idx 별로 별도 인스턴스가 필요하지만,
+# 노트북(1번) 이외 모니터는 mss로 안전하게 처리
 import dxcam as _dxcam_mod
 _dxcam_inst = None
 _dxcam_lock = threading.Lock()
 
 # turbojpeg 싱글턴 (PIL WebP 대비 5배 빠른 JPEG 인코딩)
-from turbojpeg import TurboJPEG
+from turbojpeg import TurboJPEG, TJPF_RGB, TJPF_BGRA
 _turbo_jpeg = TurboJPEG()
 
 
 def get_dxcam():
-    global _dxcam_inst
-    with _dxcam_lock:
-        if _dxcam_inst is None:
-            try:
-                _dxcam_inst = _dxcam_mod.create(output_color="BGR")
-            except Exception as e:
-                log.warning(f"dxcam 초기화 실패, mss로 폴백: {e}")
-                _dxcam_inst = None
-    return _dxcam_inst
+    # dxcam 비활성화 — cv2 의존 충돌 + 멀티모니터 좌표 문제.
+    # mss로 통일 (멀티모니터 완벽 지원, 속도 충분)
+    return None
 
 
 # ── 모니터 고정 식별 (자리가 아니라 ID) — 노트북 항상 1번 + 결정적 순서 → 깜빡임 제거 ──
@@ -626,10 +622,13 @@ def _frame_measure(nbytes: int, w: int, h: int, lte: bool, enc_ms: float) -> Non
 
 def grab_region(view: dict, last_hash):
     """뷰포트 영역만 캡처. 안 변했으면 (None,hash). 출력은 폰 액정 크기에 맞춤."""
+    m = _mon(STATE["monitor"])
     box = crop_box(view)
-    cam = get_dxcam()
+    # dxcam은 primary monitor(origin=0,0)에서만 사용. 그 외는 mss.
+    use_dxcam = (m["left"] == 0 and m["top"] == 0)
+    cam = get_dxcam() if use_dxcam else None
     if cam is not None:
-        # dxcam: GPU DDA 캡처 (AnyDesk 방식, mss 대비 10배 빠름)
+        # dxcam: GPU DDA 캡처 (primary 한정) — region은 (0,0) 기준 상대좌표
         region = (box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"])
         raw_np = cam.grab(region=region)
         if raw_np is None:
@@ -639,12 +638,30 @@ def grab_region(view: dict, last_hash):
             return None, h
         img = Image.fromarray(raw_np[:, :, ::-1])  # BGR → RGB
     else:
-        # mss 폴백
+        # mss — numpy 직통 경로 (rgb 변환 없이 BGRA→BGRA 그대로 처리)
+        import numpy as _np
         raw = get_mss().grab(box)
-        h = hash(raw.rgb)
+        # zero-copy: frombuffer로 mss 내부 버퍼 직접 참조 (bytes() 전체복사 제거)
+        arr = _np.frombuffer(raw.raw, _np.uint8).reshape((raw.height, raw.width, 4))
+        # 균등 샘플 해시 (~0.1ms): 64×64 격자로 ~4096픽셀 샘플
+        h = hash(arr[::max(1, arr.shape[0] // 64), ::max(1, arr.shape[1] // 64)].tobytes())
         if h == last_hash:
             return None, h
-        img = Image.frombytes("RGB", raw.size, raw.rgb)
+        lte = STATE.get("lte", False)
+        cap = STATE.get("q_width", LTE_MAX_WIDTH if lte else MAX_WIDTH)
+        quality = STATE.get("q_quality", LTE_QUALITY if lte else JPEG_QUALITY)
+        tw = max(160, min(int(view.get("w", 1280)), cap))
+        if arr.shape[1] > tw:
+            nh = max(1, round(arr.shape[0] * tw / arr.shape[1]))
+            # PIL resize: BGRA(4채널)로 NEAREST (색상 무관, 크기만 줄임)
+            img_bgra = Image.fromarray(arr).resize((tw, nh), Image.NEAREST)
+            arr = _np.asarray(img_bgra)
+        _t0 = time.time()
+        # BGRA → JPEG 직통 (rgb 변환 0번)
+        data = _turbo_jpeg.encode(arr, quality=quality, pixel_format=TJPF_BGRA)
+        _frame_measure(len(data), arr.shape[1], arr.shape[0], lte, (time.time() - _t0) * 1000)
+        return data, h
+    # dxcam 경로 (현재 비활성, get_dxcam()=None)
     lte = STATE.get("lte", False)
     cap = STATE.get("q_width", LTE_MAX_WIDTH if lte else MAX_WIDTH)
     quality = STATE.get("q_quality", LTE_QUALITY if lte else JPEG_QUALITY)
@@ -654,7 +671,7 @@ def grab_region(view: dict, last_hash):
         img = img.resize((tw, nh), Image.NEAREST)
     _t0 = time.time()
     import numpy as _np
-    data = _turbo_jpeg.encode(_np.asarray(img), quality=quality)
+    data = _turbo_jpeg.encode(_np.asarray(img), quality=quality, pixel_format=TJPF_RGB)
     _frame_measure(len(data), img.width, img.height, lte, (time.time() - _t0) * 1000)
     return data, h
 
@@ -1100,21 +1117,25 @@ async def handle_message(msg: dict):
         return None
     if t == "monitor_switch":
         mons = _stable_mons()
-        # EDID 키 우선 (진실). 키 모니터가 현재 환경에 있으면 그 번호로. 없으면 번호 폴백.
         edid = str(msg.get("edid", "")).strip()
+        req_num = msg.get("monitor", "?")
+        log.info(f"[DBG] monitor_switch 수신: monitor={req_num} edid={edid[:20] if edid else '(없음)'}")
         n = None
         if edid:
             idx = _idx_by_key(edid)
+            log.info(f"[DBG] _idx_by_key({edid[:20]}) → {idx}")
             if idx is not None:
                 n = idx
                 STATE["monitor_key"] = edid
-        if n is None:                              # 구버전 폰(번호만) 또는 키 못 찾음 → 번호로
+        if n is None:
             n = int(msg.get("monitor", 1))
             if n < 1 or n > len(mons) - 1:
                 n = 1
-            STATE["monitor_key"] = _mon_key_num(n) or ""   # 번호 전환도 즉시 키로 승격
+            STATE["monitor_key"] = _mon_key_num(n) or ""
         STATE["monitor"] = n
-        _resync_monitor()                          # 번호를 키 기준으로 확정
+        before_resync = n
+        _resync_monitor()
+        log.info(f"[DBG] n={before_resync} → resync 후 STATE[monitor]={STATE['monitor']}")
         STATE["view"] = {"rx1": 0.0, "ry1": 0.0, "rx2": 1.0, "ry2": 1.0,
                          "w": STATE["view"].get("w", 1280)}
         log.info(f"🖥 모니터 전환 → 번호 {STATE['monitor']} / 키 {STATE['monitor_key']}")
@@ -1429,7 +1450,7 @@ async def http_rec_get(who: str = ""):
 @app.get("/manifest.json")
 async def manifest():
     return JSONResponse({
-        "name": "폴드5 PC 원격제어", "short_name": "PC원격",
+        "name": "TapDesk", "short_name": "TapDesk",
         "start_url": "/", "display": "fullscreen", "orientation": "any",
         "background_color": "#05060a", "theme_color": "#05060a",
         "icons": [{"src": "/icon.png", "sizes": "256x256", "type": "image/png"}],
@@ -1756,18 +1777,19 @@ async def ws_endpoint(ws: WebSocket):
     global _push
     _push = send_json                  # 핫리로드 푸시용으로 현재 연결 등록
 
-    # 🔒 단일 폰 정책 — 새 연결이 인증되면 기존 연결 전부 닫는다.
-    # LTE 재연결 시 옛 TCP가 ESTABLISHED로 남아 옛 capture_loop가 같은 화면을 시차 전송
-    # → 폰이 3중 렌더 = 깜빡임/더 빨리. 옛 ws를 닫으면 옛 루프가 연쇄 종료되어 단일 스트림.
-    for _old in list(_active_socks):
-        if _old is ws:
-            continue
-        try:
-            await _old.close(code=4000)
-        except Exception:
-            pass
-    _active_socks.clear()
-    _active_socks.append(ws)
+    # 🔒 단일 폰 정책 — 로컬 연결만 적용. 릴레이(_RelayWS)는 제외.
+    # (릴레이와 로컬이 서로 _active_socks를 통해 kick하면 무한 재연결 루프 발생)
+    _is_relay = isinstance(ws, _RelayWS)
+    if not _is_relay:
+        for _old in list(_active_socks):
+            if _old is ws:
+                continue
+            try:
+                await _old.close(code=4000)
+            except Exception:
+                pass
+        _active_socks.clear()
+        _active_socks.append(ws)
 
     async def send_frame(b: bytes):
         async with send_lock:
@@ -1882,10 +1904,11 @@ async def ws_endpoint(ws: WebSocket):
         audio_task.cancel()
         video_task.cancel()
         context_task.cancel()
-        try:
-            _active_socks.remove(ws)   # 내 연결 목록에서 제거
-        except ValueError:
-            pass
+        if not _is_relay:
+            try:
+                _active_socks.remove(ws)
+            except ValueError:
+                pass
         if _push is send_json:         # 내 연결이 등록돼 있으면 해제
             _push = None
 
