@@ -1,19 +1,16 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from pathlib import Path
-import os
-import asyncio
-import json
-import logging
+import os, asyncio, json, logging
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("relay")
 
 app = FastAPI()
 
-# room_id(token) → {"pc": WebSocket | None, "phone": WebSocket | None}
-rooms: dict[str, dict] = {}
-rooms_lock = asyncio.Lock()
+# 단일 유저 릴레이: token 매칭 없음 — role="pc"면 PC슬롯, 나머지는 phone슬롯
+_pc_ws: WebSocket | None = None
+_phone_ws: WebSocket | None = None
 
 
 @app.get("/")
@@ -24,12 +21,14 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "rooms": len(rooms)}
+    return {"ok": True, "pc": _pc_ws is not None, "phone": _phone_ws is not None}
 
 
 @app.websocket("/ws")
 async def relay(ws: WebSocket):
+    global _pc_ws, _phone_ws
     await ws.accept()
+
     try:
         raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
         auth = json.loads(raw)
@@ -37,22 +36,15 @@ async def relay(ws: WebSocket):
         await ws.close(code=4001)
         return
 
-    if auth.get("type") != "auth" or not auth.get("token"):
-        await ws.close(code=4003)
-        return
+    role = auth.get("role", "phone")
 
-    token = auth["token"]
-    role = auth.get("role", "phone")   # PC는 role="pc" 명시, 폰은 기본 "phone"
+    if role == "pc":
+        _pc_ws = ws
+        log.info("PC 연결됨")
+    else:
+        _phone_ws = ws
+        log.info("폰 연결됨")
 
-    async with rooms_lock:
-        if token not in rooms:
-            rooms[token] = {"pc": None, "phone": None}
-        rooms[token][role] = ws
-
-    peer_role = "phone" if role == "pc" else "pc"
-    log.info(f"연결: role={role} token={token[:8]}…")
-
-    # 연결 확인 응답
     try:
         await ws.send_text(json.dumps({"type": "relay_ok", "role": role}))
     except Exception:
@@ -60,27 +52,29 @@ async def relay(ws: WebSocket):
 
     try:
         while True:
-            # 텍스트·바이너리 둘 다 처리
             msg = await ws.receive()
-            peer = rooms.get(token, {}).get(peer_role)
+            # 상대방 가져오기
+            peer: WebSocket | None = _phone_ws if role == "pc" else _pc_ws
             if peer is None:
                 continue
             try:
-                if "text" in msg:
-                    await peer.send_text(msg["text"])
-                elif "bytes" in msg:
-                    await peer.send_bytes(msg["bytes"])
+                text = msg.get("text")
+                data = msg.get("bytes")
+                if text is not None:
+                    await peer.send_text(text)
+                elif data is not None:
+                    await peer.send_bytes(data)
             except Exception:
                 pass
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
-        async with rooms_lock:
-            if token in rooms:
-                rooms[token][role] = None
-                if rooms[token]["pc"] is None and rooms[token]["phone"] is None:
-                    del rooms[token]
-        log.info(f"해제: role={role} token={token[:8]}…")
+        if role == "pc" and _pc_ws is ws:
+            _pc_ws = None
+            log.info("PC 해제")
+        elif role != "pc" and _phone_ws is ws:
+            _phone_ws = None
+            log.info("폰 해제")
 
 
 if __name__ == "__main__":
