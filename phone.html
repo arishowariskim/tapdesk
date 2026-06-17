@@ -5373,6 +5373,9 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
     {a:"hk:home",l:"홈"},{a:"hk:end",l:"엔드"},{a:"hk:tab",l:"탭"},
     {a:"hk:up",l:"위 ↑"},{a:"hk:down",l:"아래 ↓"},{a:"hk:left",l:"왼 ←"},{a:"hk:right",l:"오 →"},
   ];
+  // 🧰 앱의 모든 도크 버튼도 팔레트에 추가 (새로고침·캡처·클립보드·설정·무음·시계·크롬·클로드 등 9칸에 자유 배치)
+  try { if (typeof DOCK_BTNS !== "undefined" && Array.isArray(DOCK_BTNS)) DOCK_BTNS.forEach((d) => PAL.push({ a:"btn:"+d.id, l:(d.ico ? d.ico+" " : "")+d.name })); } catch (e) {}
+  try { if (document.getElementById("btnSettings")) PAL.push({ a:"btn:btnSettings", l:"⚙️ 설정" }); } catch (e) {}
   const PLABEL = {}; PAL.forEach((p) => { PLABEL[p.a] = p.l; });
   let cpGrid = ["","key_enter","","select_line","select_all","paste","","copy",""];   // 기본: 십자=기존기능 / 모서리=빈칸
   try { const g = JSON.parse(localStorage.getItem("cpGrid")); if (Array.isArray(g) && g.length === 9) cpGrid = g; } catch (e) {}
@@ -5381,6 +5384,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
   function runAct(a) {
     if (!a) return;
     if (a.indexOf("hk:") === 0) { send({ type:"hotkey", keys:a.slice(3).split(",") }); if (navigator.vibrate) navigator.vibrate(16); toast("✓ " + (PLABEL[a] || a)); }
+    else if (a.indexOf("btn:") === 0) { const b = document.getElementById(a.slice(4)); if (b) { b.click(); if (navigator.vibrate) navigator.vibrate(16); toast("✓ " + (PLABEL[a] || a)); } }   // 도크 버튼 클릭 시뮬 = 그 도구 실행
     else fire(a, null);
   }
   function renderGrid() {
