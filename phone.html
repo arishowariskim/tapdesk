@@ -450,6 +450,7 @@ html, body {
 .pnBody  { font-size:12px; color:rgba(255,255,255,.72); max-height:2.6em; overflow:hidden; }
 #pnTimer { height:2px; background:var(--gold); border-radius:1px; margin-top:5px; transition:width 5s linear; width:100%; }
 /* 모니터 엣지 드로어 — 4벽 스냅, 롱프레스 이동 */
+#monEdgeDrawer.userHidden { display:none !important; }   /* 설정에서 왼쪽 모니터 서랍 숨김 (다시 켜면 복원) */
 #monEdgeDrawer {
   position:fixed; z-index:28; display:none;
   align-items:center; transition:top .15s, left .15s, bottom .15s, right .15s;
@@ -659,6 +660,12 @@ html, body {
 #clockW.dragging { opacity:.8; }
 #clockTime { font-weight:800; color:var(--gold); line-height:1.05; letter-spacing:.5px; white-space:nowrap; }
 #clockDate { font-size:.46em; color:#9aa0b0; margin-top:3px; white-space:nowrap; }
+/* 🔋 배터리 10% 이하 — 시계 빨강 깜빡 + 큰 알림 */
+#clockW.batLow #clockTime, #clockW.batLow #clockDate { color:#ff3b3b !important; }
+#clockW.batLow { animation:batPulse 1s ease-in-out infinite; }
+@keyframes batPulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+#batAlarm { position:fixed; top:36%; left:50%; transform:translate(-50%,-50%) scale(.7); background:rgba(210,0,0,.96); color:#fff; font-size:32px; font-weight:900; padding:24px 38px; border-radius:18px; z-index:9999; opacity:0; pointer-events:none; box-shadow:0 8px 44px rgba(0,0,0,.65); transition:opacity .25s, transform .25s; white-space:nowrap; text-align:center; }
+#batAlarm.show { opacity:1; transform:translate(-50%,-50%) scale(1); }
 #clockRz { position:absolute; right:-4px; bottom:-4px; width:24px; height:24px; }
 #clockRz::after { content:"◢"; position:absolute; right:4px; bottom:1px; font-size:11px; color:#ffffff66; }
 /* 🔆 화면 밝기 위젯 */
@@ -776,9 +783,11 @@ html, body {
 .splDiaInner span:nth-child(2){transform:translateX(-50%) rotateY(90deg);border-bottom-color:rgba(120,230,255,.72)}
 .splDiaInner span:nth-child(3){transform:translateX(-50%) rotateY(180deg);border-bottom-color:rgba(54,198,255,.45)}
 .splDiaInner span:nth-child(4){transform:translateX(-50%) rotateY(270deg);border-bottom-color:rgba(170,246,255,.62)}
+#exitCorner { position:fixed; top:0; left:0; width:56px; height:56px; z-index:2147483647; background:transparent; }   /* 🚪 좌상단 구석 투명 나가기 (작아서 PC 조작 거의 안 막음) */
 </style>
 </head>
 <body>
+<div id="exitCorner"></div>
 <div id="splash">
   <div class="splGrid"></div>
   <div class="splScan"></div>
@@ -889,6 +898,7 @@ html, body {
   <div class="btn monDockBtn" id="btnMon2" data-num="2"><span class="ico">🖥</span><span>모니터2</span></div>
   <div class="btn monDockBtn" id="btnMon3" data-num="3"><span class="ico">🖥</span><span>모니터3</span></div>
   <div class="btn monDockBtn" id="btnMon4" data-num="4"><span class="ico">🖥</span><span>모니터4</span></div>
+  <div class="btn" id="btnMute"><span class="ico">🔊</span><span>무음</span></div>
   <div class="btn" id="btnSettings"><span class="ico">⚙️</span><span>설정</span></div>
 </div>
 <div id="dockEditLayer"></div>
@@ -916,10 +926,10 @@ html, body {
   <div class="cpBtn" id="cpPaste">붙여넣기</div>
 </div>
 <div id="cpPad">
-  <div class="cpHint cpHU">▲복사</div>
+  <div class="cpHint cpHU">▲엔터</div>
   <div class="cpHint cpHL">◀줄</div>
   <div class="cpHint cpHR">붙여▶</div>
-  <div class="cpHint cpHD">▼엔터</div>
+  <div class="cpHint cpHD">▼복사</div>
   <div id="cpPadResize"></div>
 </div>
 
@@ -1032,7 +1042,13 @@ html, body {
 
     <div class="grid2" style="margin-top:9px;">
       <button class="cpSegBtn" id="sndToggle">🔇 PC 소리</button>
-      <button class="cpSegBtn" id="wgtFs" style="grid-column:span 2;">📱 네비바</button>
+      <button class="cpSegBtn" id="wgtFs">📱 네비바</button>
+    </div>
+    <div style="margin-top:9px;">
+      <button class="cpSegBtn" id="monReset" style="width:100%;">🖥 모니터 재인식 (새 환경)</button>
+    </div>
+    <div style="margin-top:9px;">
+      <button class="cpSegBtn" id="monEdgeToggle" style="width:100%;">🖥 왼쪽 모니터 서랍 표시</button>
     </div>
 
     <!-- 스크롤 위젯 다중 선택 -->
@@ -1350,8 +1366,10 @@ function renderMonBar() {
   [1,2,3,4].forEach(mid => {
     const btn = $("btnMon" + mid); if (!btn) return;
     const monData = monitors.find(m => m.id === mid);
-    btn.style.opacity = monData ? "1" : "0.35";
-    if (monData && monData.thumb) btn.style.backgroundImage = "url(data:image/jpeg;base64," + monData.thumb + ")";
+    if (!monData) { btn.style.display = "none"; return; }   // 없는 모니터 = 완전히 숨김 (빈 버튼 제거)
+    btn.style.display = "";
+    btn.style.opacity = "1";
+    if (monData.thumb) btn.style.backgroundImage = "url(data:image/jpeg;base64," + monData.thumb + ")";
     btn.classList.toggle("active", mid === curMon);
   });
   renderMonEdge();
@@ -1536,6 +1554,7 @@ function renderMonEdge() {
       }
       cancelDrag();
       if (_savedMonTimer) { clearTimeout(_savedMonTimer); _savedMonTimer = null; }
+      saveCurView();   // 전환 전 현재 모니터 줌 기억
       send({ type:"monitor_switch", monitor:mon.id, edid:mon.key||"" });
       // 드로어 유지 — active만 즉시 갱신
       curMon = mon.id;
@@ -1618,6 +1637,22 @@ function closeMonEdge() {
     monEdgeOpen ? closeMonEdge() : openMonEdge();
   }, { passive:true });
 })();
+// 🖥👁 왼쪽 모니터 서랍(monEdgeDrawer) 표시/숨김 — 설정에서 토글, localStorage 영구 (.userHidden = display:none !important)
+function applyMonEdgeVisible(){
+  const hidden = localStorage.getItem("monEdgeHidden") === "1";
+  const d = $("monEdgeDrawer"); if (d) d.classList.toggle("userHidden", hidden);
+  const b = $("monEdgeToggle");
+  if (b) { b.classList.toggle("active", !hidden); b.textContent = hidden ? "🖥 왼쪽 모니터 서랍 (숨김)" : "🖥 왼쪽 모니터 서랍 (표시 중)"; }
+}
+(function(){ const b = $("monEdgeToggle"); if (!b) return;
+  b.addEventListener("click", () => {
+    const hidden = localStorage.getItem("monEdgeHidden") === "1";
+    localStorage.setItem("monEdgeHidden", hidden ? "0" : "1");
+    applyMonEdgeVisible();
+    toast(hidden ? "🖥 모니터 서랍 표시" : "🖥 모니터 서랍 숨김");
+  });
+})();
+applyMonEdgeVisible();   // 초기(새로고침 후) 상태 복원
 // 🖥 도크 모니터 버튼 클릭 → 해당 모니터로 전환
 [1,2,3,4].forEach(mid => {
   const btn = $("btnMon" + mid); if (!btn) return;
@@ -1625,6 +1660,7 @@ function closeMonEdge() {
     const m = monitors.find(x => x.id === mid);
     if (!m) { toast("모니터 " + mid + " 없음"); return; }
     if (_savedMonTimer) { clearTimeout(_savedMonTimer); _savedMonTimer = null; }
+    saveCurView();   // 전환 전 현재 모니터 줌 기억
     send({ type:"monitor_switch", monitor:mid, edid:m.key||"" });
   });
 });
@@ -1687,6 +1723,7 @@ function bindMonFloat(b, id, rz) {
       const mon = monitors.find((x) => x.id === id);
       const ek = (mon && mon.key) ? mon.key : "";
       if (_savedMonTimer) { clearTimeout(_savedMonTimer); _savedMonTimer = null; }
+      saveCurView();   // 전환 전 현재 모니터 줌 기억
       send({ type:"monitor_switch", monitor:id, edid:ek });
       toast("모니터 " + id);
     }
@@ -1742,6 +1779,7 @@ function curView() {
   return viewAll[k];
 }
 let view = Object.assign({}, curView());
+function saveCurView(){ try { viewAll[viewKey()] = { cx:view.cx, cy:view.cy, z:view.z }; localStorage.setItem("viewAll", JSON.stringify(viewAll)); } catch(e){} }   // [모니터별 줌] 전환 직전 현재 줌을 그 모니터 키로 저장 (핀치/줌슬롯 무관 모든 줌 기억)
 let lastCur = null;
 let scrollSpeed = lsModeGet("scrollSpeed", 4);
 let vmOpacity = lsModeGet("vmOpacity", 95);
@@ -1832,6 +1870,17 @@ function toggleSound() {
   lsModeSet("sndOn", sndOn ? "1" : "0");
   toast(sndOn ? "소리 켜짐" : "소리 끄기");
 }
+// [모니터 재인식] 새 모니터 환경에서 누르면 → server 모니터 재인식 + 줌 전체 리셋 (검정 해제). 등록만 즉시, 본문은 클릭 시 실행이라 panX 등 TDZ 안전.
+(function(){
+  const mr = document.getElementById("monReset");
+  if (mr) mr.addEventListener("click", () => {
+    send({ type:"monitor_reset" });   // server 재시작 트리거 → 모니터 캡처 엔진까지 새로 읽음
+    view.z = 1; view.cx = 0.5; view.cy = 0.5; panX = 0; panY = 0;   // 폰 줌 리셋 (재연결 후 깨끗하게)
+    screenImg.style.transition = "none";
+    screenImg.style.transform = "";
+    toast("🖥 모니터 재인식 중… 5~10초 후 자동 재연결");
+  });
+})();
 // 🔤 설정 패널 글씨 크기 — zoom으로 전체 비례 조절, localStorage 유지
 (function(){
   const sl = $("pfsSzRange"), vl = $("pfsSzVal");
@@ -1981,7 +2030,7 @@ function onMessage(ev) {
   else if (m.type === "capture_ok") { toast("캡처"); }
   else if (m.type === "video_state") {
     if (window.setVidShown) window.setVidShown(!!m.playing);
-    toast(m.playing ? "영상 켜짐" : "영상 닫힘");
+    // [제거] "영상 켜짐/닫힘" 토스트 — 상태가 자주 바뀌어 자꾸 떠서 뺌 (내부 상태는 setVidShown으로 반영)
   }
 }
 // ───── 부팅 스플래시 (홀로그램 스캔) — 첫 프레임 뜨면 걷힘 (연결 중 흰/검은 화면 가림) ─────
@@ -2050,17 +2099,22 @@ const KB_ANCHOR = 0.72;   // 키보드 켰을때 커서가 보이는영역 어�
 function viewRect() {
   // 돋보기 — z=1: PC 전체(위아래 검은 띠). 줌인할수록 보이는 영역이
   // 폰 비율로 좁아져 검은 띠가 사라지고 폰 화면을 꽉 채움.
-  view.z = clamp(view.z, 1, 16);
+  view.z = clamp(view.z, 0.3, 16);   // 최소 0.3 (z<1=줌아웃은 sendView에서 canvas CSS 축소로 처리, z>=1=기존 server crop)
   let rw = Math.min(1, 1 / view.z);
   let rh = Math.min(1, monAspect() / (phoneAspect() * view.z));
   // 키보드 pan은 viewRect에서 매프레임 안 함 (자석처럼 따라가서 마우스 막힘) → setKeyboard에서 1회만 (kbPanUp)
-  view.cx = clamp(view.cx, rw / 2, 1 - rw / 2);
+  view.cx = clamp(view.cx, rw / 2, 1 - rw / 2);   // 줌인=모니터 경계까지 crop 이동(크기 유지) / 줌아웃(z<1, rw=1)=중앙 고정(pan은 CSS translate)
   view.cy = clamp(view.cy, rh / 2, 1 - rh / 2);
   return { rx1:view.cx-rw/2, ry1:view.cy-rh/2, rx2:view.cx+rw/2, ry2:view.cy+rh/2, rw:rw, rh:rh };
 }
 function screenLayout() {
   // object-fit:contain 으로 실제 그려지는 이미지 사각형 (레터박스 보정)
+  // [좌표 오염 방지] screenImg에 줌아웃 CSS transform(scale/translate)이 걸려 있으면 getBoundingClientRect가
+  // 변형된(축소·이동된) 사각형을 반환해 fmx/anchor가 전부 틀어짐(왼쪽 쏠림 진짜 원인) → 측정 동안만 transform 제거 후 원본 layout 기준으로 잰다.
+  const _savedT = screenImg.style.transform;
+  if (_savedT) screenImg.style.transform = "none";
   const r = screenImg.getBoundingClientRect();
+  if (_savedT) screenImg.style.transform = _savedT;
   const nw = canvasNW || screenImg.width || 16, nh = canvasNH || screenImg.height || 10;
   const ba = r.width / r.height, ia = nw / nh;
   let dw, dh, ox, oy;
@@ -2128,10 +2182,20 @@ function sendView(force) {
   const v = viewRect();
   const w = Math.round((screenImg.clientWidth || 360) * (window.devicePixelRatio || 1));
   send({ type:"set_view", rx1:v.rx1, ry1:v.ry1, rx2:v.rx2, ry2:v.ry2, w:w });
+  // [줌아웃] z<1이면 server는 모니터 전체를 보내고, 폰에서 canvas를 CSS로 축소+이동 (모니터 전체 유지 + 작아짐 + 드래그 전방향 따라옴). z>=1은 변형 없음(기존 server crop).
+  screenImg.style.transformOrigin = "center center";
+  if (view.z < 1) {
+    const f = (1 - view.z) / 0.7;   // [자석 제거] z=0.3→f=1, z=1→f=0 : 확대할수록 이동량 0으로 수렴 → z=1에서 translate=0이라 줌인(z>=1, transform 없음)과 매끄럽게 연결(경계 점프 없음)
+    screenImg.style.transform = "translate(" + (panX*f) + "px," + (panY*f) + "px) scale(" + view.z + ")";
+  } else {
+    panX = 0; panY = 0;
+    screenImg.style.transform = "";
+  }
 }
 
 // ───── 화면 영역 터치 ─────
 let mode = null, t1Start = 0, t1Moved = false, t1x = 0, t1y = 0, two = null;
+let panX = 0, panY = 0;   // [줌아웃] z<1일 때 canvas CSS 이동량(px) — 두 손가락 드래그로 전방향 pan
 let mouseMode = false;   // tapClick 모드 고정 (탭 위치로 커서 이동 + 더블클릭)
 let lpTimer = null, holding = false, tpActive = false;
 let lastFx = 0, lastFy = 0, curPos = { rx:0.5, ry:0.5 };   // 트랙패드용 — 손가락 직전위치 + 커서 추적
@@ -2164,7 +2228,9 @@ screenImg.addEventListener("touchstart", (e) => {
     const mx = (a.clientX+b.clientX)/2, my = (a.clientY+b.clientY)/2;
     two = { dist:Math.hypot(a.clientX-b.clientX, a.clientY-b.clientY),
             z:view.z, anchor:touchToPC(mx, my),
-            start:Date.now(), moved:false, smx:mx, smy:my };
+            start:Date.now(), moved:false, smx:mx, smy:my, px0:panX, py0:panY,
+            cx0:view.cx, cy0:view.cy };
+    screenImg.style.transition = "none";   // [고무줄] 드래그 시작 — 스냅백 트랜지션 끄기
   }
 }, { passive:false });
 
@@ -2192,13 +2258,22 @@ screenImg.addEventListener("touchmove", (e) => {
     const mx = (a.clientX+b.clientX)/2, my = (a.clientY+b.clientY)/2;
     if (Math.abs(dist-two.dist) > 12 || Math.hypot(mx-two.smx, my-two.smy) > 16)
       two.moved = true;                     // 핀치·이동 = 우클릭 탭 아님
-    view.z = clamp(two.z * (dist/two.dist), 1, 16);
+    view.z = clamp(two.z * (dist/two.dist), 0.3, 16);
     const v = viewRect();
     const L = screenLayout();
-    const fx = clamp((mx-L.left)/L.w, 0, 1), fy = clamp((my-L.top)/L.h, 0, 1);
-    view.cx = two.anchor.rx - fx*v.rw + v.rw/2;
-    view.cy = two.anchor.ry - fy*v.rh + v.rh/2;
-    sendView(); placeCursor();
+    if (view.z < 1) {   // [줌아웃] 작아진 모니터를 두 손가락 따라 전방향 이동 (CSS translate)
+      panX = two.px0 + (mx - two.smx);
+      panY = two.py0 + (my - two.smy);
+      sendView();
+    } else {            // [줌인] AnyDesk식 — 손가락(핀치 중심) 고정 확대 + 손가락 따라 팬
+      const rw = Math.min(1, 1 / view.z), rh = Math.min(1, monAspect() / (phoneAspect() * view.z));
+      const fmx = clamp((mx - L.left) / L.w, 0, 1), fmy = clamp((my - L.top) / L.h, 0, 1);   // 손가락 중심의 화면 내 위치(0~1)
+      view.cx = two.anchor.rx - rw * (fmx - 0.5);   // 핀치 시작점(anchor)이 항상 손가락 중심에 오게 → 손가락 중심 줌(왼쪽 쏠림 해결)
+      view.cy = two.anchor.ry - rh * (fmy - 0.5);
+      screenImg.style.transform = "";   // 고무줄 제거 — 실제 crop 이동(viewRect가 경계 clamp)
+      sendView();
+    }
+    placeCursor();
   }
 }, { passive:false });
 
@@ -2225,6 +2300,10 @@ screenImg.addEventListener("touchend", (e) => {
       send({ type:"mouse_click", button:"right" });  // 두 손가락 톡 = 우클릭
       two = null;
     } else {
+      if (view.z >= 1) {   // [줌인] 실제 팬으로 이미 이동 완료 — 스냅백 안 함 (AnyDesk식: 끈 자리 유지)
+        screenImg.style.transition = "";
+        screenImg.style.transform = "";
+      }
       sendView(true);
       // 핀치 줌도 모니터별로 저장 — 안 하면 모니터 전환 후 옛 줌으로 되돌아감 (버그 수정)
       viewAll[viewKey()] = { cx:view.cx, cy:view.cy, z:view.z };
@@ -2366,6 +2445,36 @@ $("btnShowDesktop").addEventListener("click", () => {
   send({ type:"show_desktop" });
   toast("바탕화면");
 });
+// 🚪🔲 좌상단 구석 투명 나가기 — 폰 터치하면 앱 종료 (touchstart만 가로챔 → PC 화면 마우스 조작은 그대로)
+if ($("exitCorner")) $("exitCorner").addEventListener("touchstart", function(e){
+  e.preventDefault(); e.stopPropagation();
+  try { AndroidSTT.exit(); } catch(err){}
+}, { passive:false, capture:true });
+
+// 🔄⬇ Pull-to-refresh — 화면 맨 위(좌상단 나가기 구석 제외)에서 아래로 당기면 새로고침 (btnReload와 동일 동작)
+(function(){
+  let pY=-1, pulling=false, ind=null;
+  function showInd(){ if(ind)return; ind=document.createElement("div"); ind.textContent="🔄 놓으면 새로고침"; ind.style.cssText="position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:2147483646;background:rgba(20,16,8,.94);color:#f0c674;border:1px solid #b8902f;border-radius:22px;padding:9px 20px;font-size:15px;font-weight:700;pointer-events:none;box-shadow:0 4px 20px rgba(0,0,0,.55)"; document.body.appendChild(ind); }
+  function hideInd(){ if(ind){ ind.remove(); ind=null; } }
+  document.addEventListener("touchstart",function(e){
+    var t=e.touches[0];
+    if(t && t.clientY<58 && t.clientX>58){ pY=t.clientY; pulling=false; e.stopPropagation(); }  // 상단 58px·좌상단 구석(나가기)은 제외
+    else pY=-1;
+  },{capture:true});
+  document.addEventListener("touchmove",function(e){
+    if(pY<0)return;
+    var t=e.touches[0]; if(!t)return;
+    var dy=t.clientY-pY;
+    if(dy>8){ e.stopPropagation(); e.preventDefault(); }      // PC 전송 차단(상단 당김 전용)
+    if(dy>120 && !pulling){ pulling=true; showInd(); }
+    else if(dy<=120 && pulling){ pulling=false; hideInd(); }
+  },{capture:true,passive:false});
+  document.addEventListener("touchend",function(e){
+    if(pY>=0) e.stopPropagation();
+    var wasP=pulling; pY=-1; pulling=false; hideInd();
+    if(wasP){ try{localStorage.setItem("justReloaded","1");}catch(_){}  setTimeout(function(){location.reload();},60); }
+  },{capture:true});
+})();
 // 🚪 닫기 — 폰 홈 화면으로. 네이티브 앱=AndroidSTT.exit()(앱을 홈으로), 웹(PWA)=창 닫기.
 $("btnHome").addEventListener("click", () => {
   if (typeof AndroidSTT !== "undefined" && AndroidSTT && typeof AndroidSTT.exit === "function") {
@@ -2410,10 +2519,66 @@ function updateClock() {
   let h = d.getHours(); const ap = h < 12 ? "AM" : "PM"; const h12 = h % 12 || 12;
   const p = (n) => String(n).padStart(2, "0");
   $("clockTime").textContent = `${ap} ${h12}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-  $("clockDate").textContent = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} (${days[d.getDay()]})`;
+  $("clockDate").textContent = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} (${days[d.getDay()]})` + _batPct;
 }
+// 🔋 폰 배터리 — 시계 날짜 옆에 작게 표시. Tailscale http에서 Battery API가 막히면 _batPct 빈 채로 둠(날짜만, 안 깨짐).
+let _batPct = "";
+let _batAlarmTimer = null;
+function _bigBatAlarm(){   // 큰 밥 알림 (6초 + 진동)
+  let el = document.getElementById("batAlarm");
+  if (!el) { el = document.createElement("div"); el.id = "batAlarm"; document.body.appendChild(el); }
+  el.textContent = "🔋 대표님 밥 좀 주세요!";
+  el.classList.add("show");
+  if (navigator.vibrate) navigator.vibrate([300,120,300]);
+  setTimeout(() => el.classList.remove("show"), 6000);
+}
+function _batAlarmCheck(lv, charging){   // 10% 이하 & 충전중 아님 → 시계 빨강 + 1분마다 알림
+  const low = (typeof lv === "number" && lv >= 0 && lv <= 10 && !charging);
+  try { if (typeof clockW !== "undefined" && clockW) clockW.classList.toggle("batLow", low); } catch(e){}
+  if (low && !_batAlarmTimer) { _bigBatAlarm(); _batAlarmTimer = setInterval(_bigBatAlarm, 60000); }
+  else if (!low && _batAlarmTimer) { clearInterval(_batAlarmTimer); _batAlarmTimer = null; }
+}
+function _readNativeBat(){   // 네이티브(AndroidSTT) 배터리 — typeof 체크 없이 직접 호출 (WebView 브릿지는 typeof가 function이 아님)
+  if (!window.AndroidSTT) { _batPct = ""; return false; }
+  try {
+    const lv = AndroidSTT.batteryLevel();
+    if (typeof lv === "number" && lv >= 0) {
+      let ch = false; try { ch = AndroidSTT.batteryCharging(); } catch(e){}
+      _batPct = "  🔋" + lv + "%" + (ch ? "⚡" : "");
+      _batAlarmCheck(lv, ch);   // 10% 알람 체크
+      return true;
+    }
+  } catch(e){}
+  _batPct = "";   // 실패 시 날짜만 (디버그 메시지 노출 안 함)
+  return false;
+}
+(function _setupBattery(){
+  if (_readNativeBat()) { setInterval(_readNativeBat, 30000); return; }   // 1순위: 네이티브(새 APK)
+  if (!navigator.getBattery) return;                                      // 2순위: 브라우저 Battery API (https/localhost)
+  navigator.getBattery().then((bat) => {
+    const ub = () => { _batPct = "  🔋" + Math.round(bat.level * 100) + "%" + (bat.charging ? "⚡" : ""); };
+    ub();
+    bat.addEventListener("levelchange", ub);
+    bat.addEventListener("chargingchange", ub);
+  }).catch(() => {});
+})();
 updateClock(); setInterval(updateClock, 1000); applyClk();
 $("btnClock").addEventListener("click", () => { clkSt.show = !clkSt.show; saveClk(); applyClk(); toast(clkSt.show ? "🕐 시계 켜짐" : "시계 숨김"); });
+// 🔇 무음 토글 — 미디어·벨·알림 전부 끄기(네이티브). 효과음은 네이티브 beep. 첫 무음 시 DND 권한 없으면 설정 안내.
+let _muted = false;
+if ($("btnMute")) $("btnMute").addEventListener("click", () => {
+  let needDnd = false;
+  try { needDnd = window.AndroidSTT && AndroidSTT.needDndAccess && AndroidSTT.needDndAccess(); } catch(e){}
+  if (!_muted && needDnd) {            // 무음 켜려는데 권한 없음 → 권한 화면 열고 안내
+    try { AndroidSTT.openDndAccess(); } catch(e){}
+    toast("🔇 '방해 금지 접근' 켜고 다시 눌러줘");
+    return;
+  }
+  _muted = !_muted;
+  try { if (window.AndroidSTT) AndroidSTT.setSilent(_muted); } catch(e){}
+  const ic = $("btnMute").querySelector(".ico"); if (ic) ic.textContent = _muted ? "🔇" : "🔊";
+  toast(_muted ? "🔇 폰 무음 (소리 다 꺼짐)" : "🔊 소리 켜짐");
+});
 // 📥 복사 감시 — 켜면 PC에서 복사하는 게(코드블록·Ctrl+C 등) 보관함에 자동 입고
 let clipWatch = localStorage.getItem("clipWatch") === "1";
 function syncClipWatch() { $("btnClipWatch").classList.toggle("active", clipWatch); send({ type: "clip_watch", on: clipWatch }); }
@@ -3501,7 +3666,7 @@ function applyView() {
 }
 function zoomStep(dir) {                     // dir: +1=줌인(커서중심), -1=줌아웃
   if (dir > 0 && lastCur) { view.cx = lastCur[0]; view.cy = lastCur[1]; }
-  view.z = clamp(view.z * (dir > 0 ? ZOOM_STEP : 1 / ZOOM_STEP), 1, 16);
+  view.z = clamp(view.z * (dir > 0 ? ZOOM_STEP : 1 / ZOOM_STEP), 0.3, 16);
   applyView();
 }
 // 새 역할:
@@ -3759,6 +3924,8 @@ function bindZPreBtn(b) {                                  // 톡=점프 / 톡�
         sendMove(p.cx, p.cy, true);                        // PC 커서를 줌 영역 중심으로 강제 끌어옴
         lastCur = [p.cx, p.cy];
         applyView();
+        viewAll[viewKey()] = { cx:view.cx, cy:view.cy, z:view.z };   // [추가] 슬롯 점프 줌도 모니터별 기억에 저장 → 다른 모니터 갔다 와도 이 줌 복원
+        try { localStorage.setItem("viewAll", JSON.stringify(viewAll)); } catch(e) {}
         setActivePreset(n);                                // 선택한 슬롯 노란 강조
         toast("줌 " + n);
       } else {
@@ -3945,6 +4112,7 @@ const DOCK_BTNS = [
   { id:"btnClock", ico:"🕐", name:"시계" },
   { id:"btnBright", ico:"🔆", name:"밝기" },
   { id:"btnClipWatch", ico:"📥", name:"복사감시" },
+  { id:"btnMute", ico:"🔊", name:"무음" },
   { id:"btnMon1", ico:"🖥", name:"모니터1" },
   { id:"btnMon2", ico:"🖥", name:"모니터2" },
   { id:"btnMon3", ico:"🖥", name:"모니터3" },
@@ -5233,7 +5401,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
     if (pFired) return;                           // 전체선택 드래그 이미 발동 → 탭 안 함
     // 탭 = 패드 중심 대비 누른 위치로 방향 (위=복사 / 아래=엔터 / 왼=줄선택 / 오=붙여넣기)
     const ox = psx - pCx, oy = psy - pCy;
-    const action = (Math.abs(oy) >= Math.abs(ox)) ? (oy < 0 ? "copy" : "key_enter") : (ox < 0 ? "select_line" : "paste");
+    const action = (Math.abs(oy) >= Math.abs(ox)) ? (oy < 0 ? "key_enter" : "copy") : (ox < 0 ? "select_line" : "paste");   // [스왑] 위=엔터 / 아래=복사
     fire(action, null);
     pad.classList.add("fire"); setTimeout(() => pad.classList.remove("fire"), 200);
   }, { passive:false });

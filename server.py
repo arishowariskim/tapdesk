@@ -1115,6 +1115,13 @@ async def handle_message(msg: dict):
         STATE["q_quality"] = p["quality"]
         log.info(f"🎚 화질 모드: {mode} → {p}")
         return None
+    if t == "monitor_reset":                    # [모니터 재셋팅] = server 프로세스 재시작 트리거
+        # mss(화면캡처 엔진)가 스레드로컬이라, STATE만 리셋하면 캡처 스레드의 mss는 옛 모니터를 그대로 봄.
+        # → 프로세스를 통째로 재시작해야 캡처 스레드 mss까지 새 모니터로 갱신됨(=내가 한 재시작과 동일). watchdog(7781)이 재기동.
+        log.info("🔄 폰 요청 → server 재시작 (새 모니터 환경 인식)")
+        import threading as _th, os as _os
+        _th.Timer(0.6, lambda: _os._exit(0)).start()   # 응답 전송 뒤 0.6초 후 종료 → 경비원이 6~14초 내 재기동
+        return {"type": "monitor_ok", "monitor": STATE.get("monitor", 1), "key": STATE.get("monitor_key", "")}
     if t == "monitor_switch":
         mons = _stable_mons()
         edid = str(msg.get("edid", "")).strip()
