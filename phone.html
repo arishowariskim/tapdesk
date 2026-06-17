@@ -3173,8 +3173,13 @@ function nativeFlush(words, includeLast) {
 function nativeWords(text) { return text.normalize("NFC").split(/\s+/).filter(Boolean); }   // NFC 정규화 + 단어분리
 
 // 🎙 음성 명령어 — 말한 게 이 단어와 정확히 일치하면 텍스트 입력 대신 기능 실행 (맵에 추가하면 명령 늘어남)
-const VOICE_CMD = { "엔터":"key_enter", "엔터키":"key_enter", "enter":"key_enter", "줄바꿈":"key_enter", "다음줄":"key_enter" };
-function voiceCmd(text) { const t = (text || "").trim().toLowerCase().replace(/[.,!?·]/g,"").trim(); return VOICE_CMD[t] || null; }
+const VOICE_CMD = { "엔터":"key_enter", "엔터키":"key_enter", "엔터쳐":"key_enter", "엔터해":"key_enter", "엔트":"key_enter", "엔타":"key_enter", "enter":"key_enter", "줄바꿈":"key_enter", "다음줄":"key_enter" };
+function voiceCmd(text) {
+  let t = (text || "").normalize("NFC").trim().toLowerCase().replace(/[\s.,!?·~]/g,"");
+  if (VOICE_CMD[t]) return VOICE_CMD[t];
+  if (t.length <= 7) { for (const k in VOICE_CMD) { if (k.length >= 2 && t.indexOf(k) >= 0) return VOICE_CMD[k]; } }   // 짧은 발화에 명령어 단어 포함 = 명령 (STT 변형 흡수)
+  return null;
+}
 function runVoiceCmd(cmd, text) { send({ type: cmd }); if (navigator.vibrate) navigator.vibrate(20); toast("🎙 " + (text||"").trim() + " → 실행"); nativeNeedSpace = false; nativeLastFinal = ""; nativeCommitted = []; }
 
 window.onNativeSTTPartial = function (text) {       // 말하는 중 — 실시간만, 마지막 단어 보류
@@ -3219,6 +3224,8 @@ function startRec() {
     const last = e.results[e.results.length - 1];   // continuous=false → 현재 발화 결과만
     if (!last) return;
     const cur = last[0].transcript;
+    const _vc = voiceCmd(cur);                       // 🎙 음성 명령(엔터 등) — 텍스트 대신 기능 실행
+    if (_vc) { if (last.isFinal) { send({ type:_vc }); if (navigator.vibrate) navigator.vibrate(20); toast("🎙 " + cur.trim() + " → 실행"); sessionSent = ""; needSpace = false; } return; }
     // 폰 미리보기 단계 없이 바로 PC로 — 이번 발화 안에서 실시간 diff (바뀐 끝부분만 즉시 반영)
     let c = 0;
     const n = Math.min(sessionSent.length, cur.length);
