@@ -2462,9 +2462,9 @@ if ($("exitCorner")) $("exitCorner").addEventListener("touchstart", function(e){
   function hideInd(){ if(ind){ ind.remove(); ind=null; } }
   document.addEventListener("touchstart",function(e){
     var t=e.touches[0];
-    // 상단 58px·좌상단 구석(나가기) 제외 + 위젯/버튼 위가 아니면 pull (PC화면·빈 영역에서 당기면 새로고침)
+    // 화면 상단의 '가로 중앙 좁은 띠(±85px)'에서만 pull → 나머지 상단은 다 풀려서 마우스 클릭/PC 조작 가능. 위젯 위는 제외
     var onWidget = e.target && e.target.closest && e.target.closest('#clockW,#cpPad,#cpPalette,#brightW,#monEdgeDrawer,#zoomPanel,#vmouse,#cpTools1,.btn,.cpCell');
-    if(t && t.clientY<58 && t.clientX>58 && !onWidget){ pY=t.clientY; pulling=false; e.stopPropagation(); }
+    if(t && t.clientY<58 && Math.abs(t.clientX - innerWidth/2) < 85 && !onWidget){ pY=t.clientY; pulling=false; e.stopPropagation(); }
     else pY=-1;
   },{capture:true});
   document.addEventListener("touchmove",function(e){
