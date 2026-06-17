@@ -5401,7 +5401,13 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
   function runAct(a) {
     if (!a) return;
     if (a.indexOf("hk:") === 0) { send({ type:"hotkey", keys:a.slice(3).split(",") }); if (navigator.vibrate) navigator.vibrate(16); toast("✓ " + (PLABEL[a] || a)); }
-    else if (a.indexOf("btn:") === 0) { const b = document.getElementById(a.slice(4)); if (b) { b.click(); if (navigator.vibrate) navigator.vibrate(16); toast("✓ " + (PLABEL[a] || a)); } }   // 도크 버튼 클릭 시뮬 = 그 도구 실행
+    else if (a.indexOf("btn:") === 0) {
+      const id = a.slice(4);
+      const DIRECT = { btnDelete:"backspace", btnEnter:"key_enter" };   // click 핸들러 없는(touch기반) 도크 버튼은 9칸에서 .click()이 안 먹힘 → 동작 직접 전송
+      if (DIRECT[id]) send({ type:DIRECT[id] });
+      else { const b = document.getElementById(id); if (b) b.click(); }
+      if (navigator.vibrate) navigator.vibrate(16); toast("✓ " + (PLABEL[a] || a));
+    }
     else fire(a, null);
   }
   function renderGrid() {
@@ -5426,10 +5432,20 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
     $("cpPalette").classList.add("on");
   }
   $("cpPalette").addEventListener("click", (e) => { if (e.target.id === "cpPalette") $("cpPalette").classList.remove("on"); });
+  const LONG_MAP = { "hk:left":"hk:home", "hk:right":"hk:end" };   // 🎯 방향키 길게 = 처음(Home)/끝(End)
   pad.querySelectorAll(".cpCell").forEach((cell) => {
     if (cell.dataset.i === "4") return;   // 가운데 = 이동핸들 겸용(아래 별도 touch 핸들러)
+    let _clt = null, _cLong = false;
+    cell.addEventListener("touchstart", () => {
+      _cLong = false;
+      if (cpEdit) return;
+      const a = cpGrid[+cell.dataset.i];
+      if (a && LONG_MAP[a]) _clt = setTimeout(() => { _cLong = true; runAct(LONG_MAP[a]); cell.classList.add("fire"); setTimeout(() => cell.classList.remove("fire"), 190); if (navigator.vibrate) navigator.vibrate(20); }, 500);
+    }, { passive:true });
+    cell.addEventListener("touchend", () => { if (_clt) { clearTimeout(_clt); _clt = null; } });
     cell.addEventListener("click", (e) => {
       e.stopPropagation();
+      if (_cLong) { _cLong = false; return; }   // 길게 발동했으면 탭 무시
       const i = +cell.dataset.i;
       if (cpEdit) { openPalette(i); }
       else { const a = cpGrid[i]; if (a) { runAct(a); cell.classList.add("fire"); setTimeout(() => cell.classList.remove("fire"), 190); } }
