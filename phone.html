@@ -5526,18 +5526,20 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
   renderGrid();
 
   // 우하단 칸(투명 핸들 겸용): 탭=칸8 기능 / 잡고 드래그=크기조절 (이동은 가운데 길게로 옮김 — 구석은 잡기 힘들어서)
-  let rzx, rzy, rzs, rzTap;
+  let rzx, rzy, rzs, rzTap, rzLong = false, rzLongT = null;
   const rzEl = $("cpPadResize");
   rzEl.addEventListener("touchstart", (e) => {
     e.preventDefault(); e.stopPropagation();
     const t = e.touches[0];
-    rzx = t.clientX; rzy = t.clientY; rzs = CP.scale2; rzTap = true;
+    rzx = t.clientX; rzy = t.clientY; rzs = CP.scale2; rzTap = true; rzLong = false;
+    const a8 = cpGrid[8];   // 우하단 칸도 길게=LONG_MAP(방향키 끝 등) 되게 (셀 길게가 resize 핸들에 가려서 안 됐던 것 보완)
+    if (!cpEdit && a8 && LONG_MAP[a8]) rzLongT = setTimeout(() => { rzLong = true; rzTap = false; runAct(LONG_MAP[a8]); const c8 = pad.querySelector('.cpCell[data-i="8"]'); if (c8) { c8.classList.add("fire"); setTimeout(() => c8.classList.remove("fire"), 190); } if (navigator.vibrate) navigator.vibrate(20); }, 500);
   }, { passive:false });
   rzEl.addEventListener("touchmove", (e) => {
     e.preventDefault(); e.stopPropagation();
     const t = e.touches[0];
     if (Math.hypot(t.clientX - rzx, t.clientY - rzy) > 8) {
-      rzTap = false;
+      rzTap = false; if (rzLongT) { clearTimeout(rzLongT); rzLongT = null; }
       CP.scale2 = clamp(rzs + (t.clientX - rzx) / 230, 0.7, 2.2);
       applyScale2();
       const w = 150 * CP.scale2;                          // 크기 키울 때 화면 밖으로 안 나가게 (벽에 붙임)
@@ -5547,6 +5549,8 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
   }, { passive:false });
   rzEl.addEventListener("touchend", (e) => {
     e.preventDefault(); e.stopPropagation();
+    if (rzLongT) { clearTimeout(rzLongT); rzLongT = null; }
+    if (rzLong) { rzLong = false; return; }   // 길게 발동했으면 탭/크기 무시
     if (rzTap) {                          // 짧은 탭 = 우하단 칸(8) 기능 (편집모드면 팔레트)
       if (cpEdit) openPalette(8);
       else { const a = cpGrid[8]; if (a) { runAct(a); const c8 = pad.querySelector('.cpCell[data-i="8"]'); if (c8) { c8.classList.add("fire"); setTimeout(() => c8.classList.remove("fire"), 190); } } }
