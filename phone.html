@@ -5193,7 +5193,10 @@ $("dock").addEventListener("touchmove", (e) => {
       toast("🔼 " + dockName(fb.id) + " 꺼냄 — 끌어 옮기기 · 우하단 모서리 끌면 크기조절 · 도크에 내리면 복귀");
       return;
     }
-    if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) { dockMode = "reorder"; liftBtn.classList.add("dragging"); clearTimeout(stgTimer); stgLong = true; }  // 좌우 = 도크 내 재배치
+    if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {   // 좌우 = 도크 내 재배치
+      var _isDel = liftBtn.id === "btnDelete" || liftBtn.id.indexOf("btnDeleteDup") === 0;   // 지우기 버튼은 왼쪽드래그=연속삭제라 충돌 → 왼쪽은 재배치 양보(오른쪽 드래그로만 재배치)
+      if (!(_isDel && dx < 0)) { dockMode = "reorder"; liftBtn.classList.add("dragging"); clearTimeout(stgTimer); stgLong = true; }
+    }
   }
   if (dockMode === "reorder") {
     e.preventDefault();
