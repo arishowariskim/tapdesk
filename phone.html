@@ -781,10 +781,14 @@ html, body {
 .splDiaInner span:nth-child(3){transform:translateX(-50%) rotateY(180deg);border-bottom-color:rgba(54,198,255,.45)}
 .splDiaInner span:nth-child(4){transform:translateX(-50%) rotateY(270deg);border-bottom-color:rgba(170,246,255,.62)}
 #exitCorner { position:fixed; top:0; left:0; width:56px; height:56px; z-index:2147483647; background:transparent; }   /* 🚪 좌상단 구석 투명 나가기 (작아서 PC 조작 거의 안 막음) */
+#capOverlay { position:fixed; inset:0; z-index:50; display:none; background:rgba(0,0,0,.06); touch-action:none; }   /* 📸 영역 캡처 모드 — 드래그로 영역 지정 */
+#capOverlay.on { display:block; }
+#capRect { position:fixed; display:none; border:2px solid #e3b878; background:rgba(227,184,120,.18); pointer-events:none; z-index:51; box-shadow:0 0 0 9999px rgba(0,0,0,.12); }
 </style>
 </head>
 <body>
 <div id="exitCorner"></div>
+<div id="capOverlay"><div id="capRect"></div></div>
 <div id="splash">
   <div class="splGrid"></div>
   <div class="splScan"></div>
@@ -2319,8 +2323,40 @@ screenImg.addEventListener("touchend", (e) => {
 }, { passive:false });
 
 // ───── 도크 버튼 ─────
-// 모니터 버튼 제거됨 (대표님 요청)
-$("btnCapture").addEventListener("click", () => send({ type:"capture_to_clipboard" }));
+// 📸 캡처 — 톡=전체 캡처 / 길게=영역 캡처(드래그로 영역 지정 → 놓으면 자동 복사)
+let capArmed = false;
+(function(){
+  const b = $("btnCapture"); let clt = null, longFired = false;
+  b.addEventListener("touchstart", () => { longFired = false; clt = setTimeout(() => { longFired = true; startAreaCapture(); }, 550); }, { passive:true });
+  b.addEventListener("touchend", () => { if (clt) { clearTimeout(clt); clt = null; } });
+  b.addEventListener("click", () => { if (longFired) { longFired = false; return; } send({ type:"capture_to_clipboard" }); toast("📸 전체 캡처"); });
+})();
+function startAreaCapture(){
+  send({ type:"hotkey", keys:["win","shift","s"] });   // Windows 영역 캡처(스니핑) → 클립보드
+  capArmed = true;
+  const ov = $("capOverlay"); if (ov) ov.classList.add("on");
+  if (navigator.vibrate) navigator.vibrate(30);
+  toast("📸 영역 캡처 — 화면을 드래그해 영역 지정, 놓으면 자동 복사");
+}
+(function(){
+  const ov = $("capOverlay"), rect = $("capRect"); if (!ov) return;
+  let sx = 0, sy = 0;
+  ov.addEventListener("touchstart", (e) => {
+    e.preventDefault(); const t = e.touches[0]; sx = t.clientX; sy = t.clientY;
+    const p = touchToPC(sx, sy); sendMove(p.rx, p.ry, true); send({ type:"mouse_down", button:"left" });
+    if (rect) { rect.style.left = sx+"px"; rect.style.top = sy+"px"; rect.style.width = "0px"; rect.style.height = "0px"; rect.style.display = "block"; }
+  }, { passive:false });
+  ov.addEventListener("touchmove", (e) => {
+    e.preventDefault(); const t = e.touches[0];
+    const p = touchToPC(t.clientX, t.clientY); sendMove(p.rx, p.ry);
+    if (rect) { rect.style.left = Math.min(sx,t.clientX)+"px"; rect.style.top = Math.min(sy,t.clientY)+"px"; rect.style.width = Math.abs(t.clientX-sx)+"px"; rect.style.height = Math.abs(t.clientY-sy)+"px"; }
+  }, { passive:false });
+  ov.addEventListener("touchend", (e) => {
+    e.preventDefault(); send({ type:"mouse_up", button:"left" });
+    if (rect) rect.style.display = "none"; ov.classList.remove("on"); capArmed = false;
+    toast("📸 영역 → 클립보드 복사됨");
+  }, { passive:false });
+})();
 // ───── 키보드 입력 (실시간 — 폰 키보드 = PC 키보드) ─────
 const kbInput = $("kbInput"), dockEl = $("dock");
 let kbOn = false, kbSent = "", kbComposing = false, kbTimer = null;
