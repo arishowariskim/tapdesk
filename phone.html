@@ -1852,7 +1852,7 @@ function playAudio(int16) {
   const src = audioCtx.createBufferSource();
   src.buffer = ab; src.connect(audioCtx.destination);
   const now = audioCtx.currentTime;
-  if (audioNextT < now + 0.02) audioNextT = now + 0.12;   // 0.12초 버퍼
+  if (audioNextT < now + 0.02) { audioNextT = now + 0.28; window._audioGaps = (window._audioGaps || 0) + 1; }   // LTE 지터 흡수 — 0.28초 버퍼(끊김 방지). 언더런 발생 횟수 카운트(증거)
   src.start(audioNextT);
   audioNextT += ab.duration;
 }
