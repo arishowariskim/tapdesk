@@ -3983,6 +3983,7 @@ function bindZPreBtn(b) {                                  // 톡=점프 / 톡�
       tapTimer = null;
       const p = curPresets()[n];
       if (p) {
+        if (mouseMode) { mouseMode = false; try { localStorage.setItem("mouseMode","0"); } catch(e){} if (typeof updateModeBtn === "function") updateModeBtn(); }   // 줌 슬롯 점프 시 무조건 톡 순간이동 모드로 자동 (그 줌 영역에서 바로 톡 가능)
         view = { cx:p.cx, cy:p.cy, z:p.z };
         sendMove(p.cx, p.cy, true);                        // PC 커서를 줌 영역 중심으로 강제 끌어옴
         lastCur = [p.cx, p.cy];
