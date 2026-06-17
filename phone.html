@@ -2022,6 +2022,7 @@ function onMessage(ev) {
   else if (m.type === "monitor_ok") {
     curMon = m.monitor;
     curKey = m.key || ((monitors.find(x => x.id === m.monitor) || {}).key) || "";
+    if (mouseMode) { mouseMode = false; try { localStorage.setItem("mouseMode","0"); } catch(e){} if (typeof updateModeBtn === "function") updateModeBtn(); toast("👆 톡 순간이동 모드"); }   // 모니터 바꾸면 무조건 톡 순간이동 모드로 자동 (원하는 위치 바로 톡 가능)
     try { localStorage.setItem("savedMon", String(curMon)); } catch(e) {}   // 전환된 모니터의 하드웨어키
     view = Object.assign({}, curView());     // 이 모니터의 마지막 줌 상태 복원 (하드웨어키로 영구 기억)
     renderMonBar();
