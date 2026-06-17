@@ -3164,11 +3164,12 @@ function nativeFlush(words, includeLast) {
   let fresh = words.slice(overlap);                     // committed 뒤로 진짜 새 단어
   if (!includeLast && fresh.length) fresh = fresh.slice(0, -1);   // 부분결과면 마지막(가장 잘 바뀌는) 단어는 보류
   if (!fresh.length) return;
-  let ap = fresh.join(" ");
-  if (nativeNeedSpace) ap = " " + ap;
-  send({ type:"live_typing", backspaces:0, append: ap });
-  for (const w of fresh) nativeCommitted.push(w);
-  nativeNeedSpace = true;
+  for (const w of fresh) {                              // 단어별 — "엔터" 키워드면 그 자리서 엔터키, 나머지는 텍스트
+    const cmd = VOICE_CMD[w.normalize("NFC").trim().toLowerCase().replace(/[.,!?·~]/g,"")];
+    if (cmd) { send({ type:cmd }); nativeNeedSpace = false; }
+    else { send({ type:"live_typing", backspaces:0, append:(nativeNeedSpace ? " " : "") + w }); nativeNeedSpace = true; }
+    nativeCommitted.push(w);
+  }
 }
 function nativeWords(text) { return text.normalize("NFC").split(/\s+/).filter(Boolean); }   // NFC 정규화 + 단어분리
 
@@ -3198,8 +3199,12 @@ window.onNativeSTT = function (text) {              // 발화 확정
   } else {                                          // 발화끝 모드: 확정된 것만 1번
     if (!text) return;
     if (text === nativeLastFinal && (Date.now() - nativeLastFinalAt) < 1500) return;   // 잔향 중복 차단
-    send({ type:"live_typing", backspaces:0, append:(nativeNeedSpace ? " " : "") + text });
-    nativeNeedSpace = true; nativeLastFinal = text; nativeLastFinalAt = Date.now();
+    for (const w of text.split(/\s+/).filter(Boolean)) {   // 단어별 — "엔터" 키워드면 그 자리서 엔터키
+      const cmd = VOICE_CMD[w.normalize("NFC").trim().toLowerCase().replace(/[.,!?·~]/g,"")];
+      if (cmd) { send({ type:cmd }); nativeNeedSpace = false; }
+      else { send({ type:"live_typing", backspaces:0, append:(nativeNeedSpace ? " " : "") + w }); nativeNeedSpace = true; }
+    }
+    nativeLastFinal = text; nativeLastFinalAt = Date.now();
   }
 };
 function updateRecBtn() { $("btnRecord").classList.toggle("rec", recording); }
