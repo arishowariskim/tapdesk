@@ -5468,7 +5468,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
     $("cpPalette").classList.add("on");
   }
   $("cpPalette").addEventListener("click", (e) => { if (e.target.id === "cpPalette") $("cpPalette").classList.remove("on"); });
-  const LONG_MAP = { "hk:left":"hk:home", "hk:right":"hk:end" };   // 🎯 방향키 길게 = 처음(Home)/끝(End)
+  const LONG_MAP = { "hk:left":"hk:home", "hk:right":"hk:end", "btn:btnDelete":"select_all_delete", "hk:backspace":"select_all_delete" };   // 🎯 방향키 길게=처음/끝, 지우기 길게=전체삭제
   pad.querySelectorAll(".cpCell").forEach((cell) => {
     if (cell.dataset.i === "4") return;   // 가운데 = 이동핸들 겸용(아래 별도 touch 핸들러)
     let _clt = null, _cLong = false;
