@@ -607,7 +607,8 @@ html, body {
 }
 #cpPad {
   position:fixed; z-index:28; display:none;
-  width:88px; height:88px; border-radius:50%;
+  width:150px; height:150px; border-radius:16px;
+  grid-template-columns:repeat(3,1fr); grid-template-rows:repeat(3,1fr); gap:4px; padding:6px;
   transform-origin:top left; touch-action:none;
   background:radial-gradient(circle at 50% 38%, rgba(58,47,24,.5), rgba(10,9,6,.86) 72%);
   -webkit-backdrop-filter:blur(15px) saturate(1.5); backdrop-filter:blur(15px) saturate(1.5);
@@ -615,7 +616,7 @@ html, body {
   box-shadow:0 0 24px rgba(227,184,120,.4), 0 0 54px rgba(227,184,120,.14),
              inset 0 0 22px rgba(227,184,120,.12), inset 0 1px 1px rgba(255,236,200,.25);
 }
-#cpPad.on { display:block; }
+#cpPad.on { display:grid; }
 /* 🫧 전역 아이콘 투명도 — 꺼낸 도크버튼·줌패널 (하단 도크·모니터썸네일 제외 — 모니터는 항시 선명) */
 .btn.floating, #zoomPanel { opacity: var(--ui-alpha, 1); }
 /* 🗒 자체 클립보드 보관함 서랍 */
@@ -691,43 +692,39 @@ html, body {
 .clipViewBtns { display:flex; gap:7px; }
 .clipViewBtns button { flex:1; background:#1a1f2b; color:#cfd6e4; border:1px solid #ffffff1f; border-radius:9px; padding:10px 8px; font-size:12.5px; }
 .clipViewBtns button.prim { background:rgba(227,184,120,.22); border-color:var(--gold); color:#fff; font-weight:700; }
-#cpPad::before {
-  content:""; position:absolute; inset:10px; border-radius:50%;
-  border:1px solid rgba(227,184,120,.3);
-  box-shadow:inset 0 0 14px rgba(227,184,120,.14); pointer-events:none;
-}
-#cpPad::after {
-  content:""; position:absolute; left:50%; top:50%;
-  width:15px; height:15px; margin:-7.5px 0 0 -7.5px; border-radius:50%;
-  background:radial-gradient(circle, #ffe9c4, rgba(227,184,120,.35) 70%, transparent);
-  box-shadow:0 0 12px rgba(227,184,120,.85); pointer-events:none;
-}
-#cpPad.fire {
-  border-color:rgba(255,228,176,.95);
-  box-shadow:0 0 34px rgba(227,184,120,.95), 0 0 70px rgba(227,184,120,.4),
-             inset 0 0 26px rgba(227,184,120,.4);
-}
 #cpPad.movemode {
   border-color:#5fd06a;
   box-shadow:0 0 30px rgba(95,208,106,.85), inset 0 0 22px rgba(95,208,106,.3);
 }
-.cpHint {
-  position:absolute; font-size:8.5px; font-weight:bold; letter-spacing:.5px;
-  color:var(--gold-bright); white-space:nowrap; pointer-events:none;
-  text-shadow:0 0 6px rgba(227,184,120,.7);
+#cpPad.editmode { border-color:#5fd06a; box-shadow:0 0 22px rgba(95,208,106,.55); }
+.cpCell {
+  display:flex; align-items:center; justify-content:center; text-align:center;
+  border-radius:9px; font-size:11.5px; font-weight:700; line-height:1.05;
+  color:var(--gold-bright); background:rgba(227,184,120,.13);
+  border:1px solid rgba(227,184,120,.28); white-space:pre-line;
+  user-select:none; -webkit-user-select:none; text-shadow:0 0 5px rgba(227,184,120,.5);
 }
-.cpHU { top:6px; left:50%; transform:translateX(-50%); }
-.cpHD { bottom:6px; left:50%; transform:translateX(-50%); }
-.cpHL { left:5px; top:50%; transform:translateY(-50%); }
-.cpHR { right:5px; top:50%; transform:translateY(-50%); }
+.cpCell.empty { background:rgba(255,255,255,.03); border:1px dashed rgba(227,184,120,.32); color:rgba(227,184,120,.45); }
+.cpCell.fire { background:rgba(255,228,176,.5); border-color:rgba(255,236,200,.95); color:#1a1206; }
+#cpPad.editmode .cpCell { border-style:dashed; }
+#cpEditBtn {
+  position:absolute; left:-7px; top:-7px; width:23px; height:23px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center; font-size:11px; z-index:3;
+  background:rgba(13,15,22,.92); border:1px solid rgba(227,184,120,.65); color:var(--gold-bright);
+}
 #cpPadResize {
-  position:absolute; right:2px; bottom:2px;
-  width:19px; height:19px; border-radius:50%;
-  background:radial-gradient(circle at 38% 35%, rgba(255,232,184,.95), rgba(227,184,120,.55));
-  border:1.4px solid rgba(255,236,200,.9);
-  box-shadow:0 0 9px rgba(227,184,120,.6), 0 1px 3px rgba(0,0,0,.5); touch-action:none;
+  position:absolute; right:0; bottom:0; width:34px; height:34px;
+  background:transparent; touch-action:none; z-index:3;
 }
-#cpPadResize:active { transform:scale(.9); }
+#cpPalette { position:fixed; inset:0; z-index:46; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.55); }
+#cpPalette.on { display:flex; }
+#cpPalInner { background:#0d0f16; border:1px solid rgba(227,184,120,.4); border-radius:14px; padding:14px;
+  width:86vw; max-width:340px; max-height:72vh; overflow-y:auto;
+  display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.cpPalItem { padding:13px 5px; border-radius:9px; background:rgba(227,184,120,.13);
+  border:1px solid rgba(227,184,120,.3); color:var(--gold-bright); font-size:12px; font-weight:700; text-align:center; }
+.cpPalItem.clear { background:rgba(255,90,90,.13); border-color:rgba(255,90,90,.4); color:#ff8a8a; grid-column:1/-1; }
+.cpPalItem:active { transform:scale(.93); }
 /* 설정 — 복붙 도구 옵션 토글 */
 .cpSeg { display:flex; gap:8px; margin-top:10px; }
 .cpSegBtn {
@@ -926,12 +923,19 @@ html, body {
   <div class="cpBtn" id="cpPaste">붙여넣기</div>
 </div>
 <div id="cpPad">
-  <div class="cpHint cpHU">▲엔터</div>
-  <div class="cpHint cpHL">◀줄</div>
-  <div class="cpHint cpHR">붙여▶</div>
-  <div class="cpHint cpHD">▼복사</div>
+  <div class="cpCell" data-i="0"></div>
+  <div class="cpCell" data-i="1"></div>
+  <div class="cpCell" data-i="2"></div>
+  <div class="cpCell" data-i="3"></div>
+  <div class="cpCell" data-i="4"></div>
+  <div class="cpCell" data-i="5"></div>
+  <div class="cpCell" data-i="6"></div>
+  <div class="cpCell" data-i="7"></div>
+  <div class="cpCell" data-i="8"></div>
+  <div id="cpEditBtn">🔒</div>
   <div id="cpPadResize"></div>
 </div>
+<div id="cpPalette"><div id="cpPalInner"></div></div>
 
 <!-- 🗒 자체 클립보드 보관함 서랍 -->
 <div id="clipDrawer">
@@ -2458,7 +2462,8 @@ if ($("exitCorner")) $("exitCorner").addEventListener("touchstart", function(e){
   function hideInd(){ if(ind){ ind.remove(); ind=null; } }
   document.addEventListener("touchstart",function(e){
     var t=e.touches[0];
-    if(t && t.clientY<58 && t.clientX>58){ pY=t.clientY; pulling=false; e.stopPropagation(); }  // 상단 58px·좌상단 구석(나가기)은 제외
+    // 상단 58px이라도 'PC화면(screenImg)' 위에서 시작할 때만 pull — 시계·버튼 등 위젯 위에선 무시(위젯 드래그 살림)
+    if(t && t.clientY<58 && t.clientX>58 && e.target && e.target.id==="screenImg"){ pY=t.clientY; pulling=false; e.stopPropagation(); }
     else pY=-1;
   },{capture:true});
   document.addEventListener("touchmove",function(e){
@@ -3166,14 +3171,22 @@ function nativeFlush(words, includeLast) {
 }
 function nativeWords(text) { return text.normalize("NFC").split(/\s+/).filter(Boolean); }   // NFC 정규화 + 단어분리
 
+// 🎙 음성 명령어 — 말한 게 이 단어와 정확히 일치하면 텍스트 입력 대신 기능 실행 (맵에 추가하면 명령 늘어남)
+const VOICE_CMD = { "엔터":"key_enter", "엔터키":"key_enter", "enter":"key_enter", "줄바꿈":"key_enter", "다음줄":"key_enter" };
+function voiceCmd(text) { const t = (text || "").trim().toLowerCase().replace(/[.,!?·]/g,"").trim(); return VOICE_CMD[t] || null; }
+function runVoiceCmd(cmd, text) { send({ type: cmd }); if (navigator.vibrate) navigator.vibrate(20); toast("🎙 " + (text||"").trim() + " → 실행"); nativeNeedSpace = false; nativeLastFinal = ""; nativeCommitted = []; }
+
 window.onNativeSTTPartial = function (text) {       // 말하는 중 — 실시간만, 마지막 단어 보류
   if (!nativeRealtime) return;
   text = (text || "").trim();
   if (!text) return;
+  if (voiceCmd(text)) return;                       // 음성 명령어 후보 → 텍스트 입력 보류 (확정 때 실행)
   nativeFlush(nativeWords(text), false);
 };
 window.onNativeSTT = function (text) {              // 발화 확정
   text = (text || "").trim();
+  const cmd = voiceCmd(text);
+  if (cmd) { runVoiceCmd(cmd, text); return; }      // 🎙 "엔터" 등 음성 명령 = 기능 실행 (텍스트 입력 안 함)
   if (nativeRealtime) {                             // 실시간: 마지막 단어까지 확정 (겹침은 nativeFlush가 제거)
     if (text) nativeFlush(nativeWords(text), true);
   } else {                                          // 발화끝 모드: 확정된 것만 1번
@@ -5255,7 +5268,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
     };
   }
   function defaultPos2() {
-    return { left:Math.round(innerWidth/2 - 44), top:innerHeight - 50 - 88 - 28 };
+    return { left:Math.round(innerWidth/2 - 75), top:innerHeight - 50 - 150 - 28 };
   }
   function fire(action, el) {
     send({ type: action });
@@ -5279,7 +5292,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
     });
   }
   function applyPos2() {
-    const w = 88 * CP.scale2, p = pos2[scrMode()] || defaultPos2();
+    const w = 150 * CP.scale2, p = pos2[scrMode()] || defaultPos2();
     const rx = (p.rx != null) ? p.rx : p.left / innerWidth;
     const ry = (p.ry != null) ? p.ry : p.top  / innerHeight;
     pad.style.left = clamp(rx * innerWidth,  0, innerWidth  - w) + "px";
@@ -5351,75 +5364,96 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
     }, { passive:false });
   });
 
-  // ── 옵션 2: 플릭 패드 (위=전체 / 왼쪽=복사 / 오른쪽=붙여넣기 / 길게=이동) ──
-  let psx, psy, pgx, pgy, pMoved, pFired, pLongT, pMove, pCx, pCy;
-  pad.addEventListener("touchstart", (e) => {
+  // ── 옵션 2: 9칸 커스터마이즈 패드 (각 칸 기능 자유배치 / 팔레트 / 편집·고정 / 우하단 이동·크기) ──
+  const PAL = [
+    {a:"copy",l:"복사"},{a:"paste",l:"붙여넣기"},{a:"key_enter",l:"엔터"},
+    {a:"select_line",l:"줄 선택"},{a:"select_all",l:"전체선택"},
+    {a:"hk:ctrl,x",l:"잘라내기"},{a:"hk:ctrl,z",l:"실행취소"},{a:"hk:ctrl,y",l:"다시실행"},
+    {a:"hk:backspace",l:"⌫ 지움"},{a:"hk:space",l:"스페이스"},{a:"hk:escape",l:"ESC"},
+    {a:"hk:home",l:"홈"},{a:"hk:end",l:"엔드"},{a:"hk:tab",l:"탭"},
+    {a:"hk:up",l:"위 ↑"},{a:"hk:down",l:"아래 ↓"},{a:"hk:left",l:"왼 ←"},{a:"hk:right",l:"오 →"},
+  ];
+  const PLABEL = {}; PAL.forEach((p) => { PLABEL[p.a] = p.l; });
+  let cpGrid = ["","key_enter","","select_line","select_all","paste","","copy",""];   // 기본: 십자=기존기능 / 모서리=빈칸
+  try { const g = JSON.parse(localStorage.getItem("cpGrid")); if (Array.isArray(g) && g.length === 9) cpGrid = g; } catch (e) {}
+  let cpEdit = false;
+  function saveGrid() { localStorage.setItem("cpGrid", JSON.stringify(cpGrid)); }
+  function runAct(a) {
+    if (!a) return;
+    if (a.indexOf("hk:") === 0) { send({ type:"hotkey", keys:a.slice(3).split(",") }); if (navigator.vibrate) navigator.vibrate(16); toast("✓ " + (PLABEL[a] || a)); }
+    else fire(a, null);
+  }
+  function renderGrid() {
+    pad.querySelectorAll(".cpCell").forEach((cell) => {
+      const i = +cell.dataset.i, a = cpGrid[i];
+      cell.textContent = a ? (PLABEL[a] || a) : (cpEdit ? "＋" : "");
+      cell.classList.toggle("empty", !a);
+    });
+    pad.classList.toggle("editmode", cpEdit);
+    const eb = $("cpEditBtn"); if (eb) eb.textContent = cpEdit ? "✏️" : "🔒";
+  }
+  function openPalette(slot) {
+    const inner = $("cpPalInner"); inner.innerHTML = "";
+    PAL.forEach((p) => {
+      const it = document.createElement("div"); it.className = "cpPalItem"; it.textContent = p.l;
+      it.addEventListener("click", (ev) => { ev.stopPropagation(); cpGrid[slot] = p.a; saveGrid(); renderGrid(); $("cpPalette").classList.remove("on"); toast("'" + p.l + "' 배치"); });
+      inner.appendChild(it);
+    });
+    const clr = document.createElement("div"); clr.className = "cpPalItem clear"; clr.textContent = "✕ 이 칸 비우기";
+    clr.addEventListener("click", (ev) => { ev.stopPropagation(); cpGrid[slot] = ""; saveGrid(); renderGrid(); $("cpPalette").classList.remove("on"); toast("칸 비움"); });
+    inner.appendChild(clr);
+    $("cpPalette").classList.add("on");
+  }
+  $("cpPalette").addEventListener("click", (e) => { if (e.target.id === "cpPalette") $("cpPalette").classList.remove("on"); });
+  pad.querySelectorAll(".cpCell").forEach((cell) => {
+    cell.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const i = +cell.dataset.i;
+      if (cpEdit) { openPalette(i); }
+      else { const a = cpGrid[i]; if (a) { runAct(a); cell.classList.add("fire"); setTimeout(() => cell.classList.remove("fire"), 190); } }
+    });
+  });
+  $("cpEditBtn").addEventListener("click", (e) => { e.stopPropagation(); cpEdit = !cpEdit; renderGrid(); toast(cpEdit ? "✏️ 편집 — 칸 톡=기능 선택" : "🔒 고정 완료"); });
+  renderGrid();
+
+  // 우하단 칸(투명 핸들 겸용): 탭=칸8 기능 / 꾹(길게)=이동 / 잡고 드래그=크기조절
+  let rzx, rzy, rzs, rzMode, rzLongT, rzGx, rzGy, rzTap;
+  const rzEl = $("cpPadResize");
+  rzEl.addEventListener("touchstart", (e) => {
     e.preventDefault(); e.stopPropagation();
     const t = e.touches[0];
-    psx = t.clientX; psy = t.clientY;
-    pgx = t.clientX - pad.offsetLeft; pgy = t.clientY - pad.offsetTop;
-    const _r = pad.getBoundingClientRect(); pCx = _r.left + _r.width / 2; pCy = _r.top + _r.height / 2;   // 패드 중심 (탭 위치로 방향 판정용)
-    pMoved = false; pFired = false; pMove = false;
-    pLongT = setTimeout(() => {
-      if (pMoved) return;
-      pMove = true; pad.classList.add("movemode");
-      if (navigator.vibrate) navigator.vibrate(32);
-      toast("📍 이동 모드 — 끌어서 위치 이동");
-    }, 600);
+    rzx = t.clientX; rzy = t.clientY; rzs = CP.scale2; rzMode = "size"; rzTap = true;
+    rzGx = t.clientX - pad.offsetLeft; rzGy = t.clientY - pad.offsetTop;
+    rzLongT = setTimeout(() => { rzMode = "move"; rzTap = false; pad.classList.add("movemode"); if (navigator.vibrate) navigator.vibrate(32); toast("📍 이동 — 끌어서 위치"); }, 500);
   }, { passive:false });
-  pad.addEventListener("touchmove", (e) => {
+  rzEl.addEventListener("touchmove", (e) => {
     e.preventDefault(); e.stopPropagation();
-    const t = e.touches[0], dx = t.clientX - psx, dy = t.clientY - psy;
-    if (pMove) {
-      const w = 88 * CP.scale2;
-      let nx = clamp(t.clientX - pgx, 0, innerWidth  - w);
-      let ny = clamp(t.clientY - pgy, 0, innerHeight - w);
-      const m = magnetSnap(nx, ny, w, w, pad);
-      pad.style.left = m.x + "px";
-      pad.style.top  = m.y + "px";
-      return;
-    }
-    const dist = Math.hypot(dx, dy);
-    if (!pMoved && dist > 11) { pMoved = true; clearTimeout(pLongT); }
-    // 왼쪽으로 확실히 밀기 = 전체선택(Ctrl+A). 방향 4개는 탭(touchend에서 위치 판정), 전체선택만 드래그.
-    if (!pFired && !pMove && dx < -40 && Math.abs(dx) > Math.abs(dy)) {
-      pFired = true;
-      fire("select_all", null);
-      pad.classList.add("fire"); setTimeout(() => pad.classList.remove("fire"), 200);
-      if (navigator.vibrate) navigator.vibrate(24); toast("전체 선택");
+    const t = e.touches[0];
+    if (rzMode === "move") {
+      const w = 150 * CP.scale2;
+      pad.style.left = clamp(t.clientX - rzGx, 0, innerWidth  - w) + "px";
+      pad.style.top  = clamp(t.clientY - rzGy, 0, innerHeight - w) + "px";
+    } else if (Math.hypot(t.clientX - rzx, t.clientY - rzy) > 8) {
+      rzTap = false; clearTimeout(rzLongT);
+      CP.scale2 = clamp(rzs + (t.clientX - rzx) / 230, 0.7, 2.2);
+      applyScale2();
+      const w = 150 * CP.scale2;                          // 크기 키울 때 화면 밖으로 안 나가게 (벽에 붙임)
+      if (pad.offsetLeft + w > innerWidth)  pad.style.left = Math.max(0, innerWidth  - w) + "px";
+      if (pad.offsetTop  + w > innerHeight) pad.style.top  = Math.max(0, innerHeight - w) + "px";
     }
   }, { passive:false });
-  pad.addEventListener("touchend", (e) => {
+  rzEl.addEventListener("touchend", (e) => {
     e.preventDefault(); e.stopPropagation();
-    clearTimeout(pLongT);
-    if (pMove) {                                  // 이동모드 → 위치 저장
+    clearTimeout(rzLongT);
+    if (rzMode === "move") {
       pad.classList.remove("movemode");
       pos2[scrMode()] = { rx:pad.offsetLeft/innerWidth, ry:pad.offsetTop/innerHeight };
       localStorage.setItem("cpPos2", JSON.stringify(pos2));
-      return;
-    }
-    if (pFired) return;                           // 전체선택 드래그 이미 발동 → 탭 안 함
-    // 탭 = 패드 중심 대비 누른 위치로 방향 (위=복사 / 아래=엔터 / 왼=줄선택 / 오=붙여넣기)
-    const ox = psx - pCx, oy = psy - pCy;
-    const action = (Math.abs(oy) >= Math.abs(ox)) ? (oy < 0 ? "key_enter" : "copy") : (ox < 0 ? "select_line" : "paste");   // [스왑] 위=엔터 / 아래=복사
-    fire(action, null);
-    pad.classList.add("fire"); setTimeout(() => pad.classList.remove("fire"), 200);
-  }, { passive:false });
-  // 패드 크기조절 (◢ 노브 잡고 좌우로 끌기)
-  let prx, prs;
-  $("cpPadResize").addEventListener("touchstart", (e) => {
-    e.preventDefault(); e.stopPropagation();
-    prx = e.touches[0].clientX; prs = CP.scale2;
-  }, { passive:false });
-  $("cpPadResize").addEventListener("touchmove", (e) => {
-    e.preventDefault(); e.stopPropagation();
-    CP.scale2 = clamp(prs + (e.touches[0].clientX - prx) / 230, 0.7, 2.0);
-    applyScale2();
-  }, { passive:false });
-  $("cpPadResize").addEventListener("touchend", (e) => {
-    e.preventDefault(); e.stopPropagation();
-    lsModeSet("cpScale2", parseFloat(CP.scale2.toFixed(3)));
-    applyPos2();
+    } else if (rzTap) {                          // 짧은 탭 = 우하단 칸(8) 기능 (편집모드면 팔레트)
+      if (cpEdit) openPalette(8);
+      else { const a = cpGrid[8]; if (a) { runAct(a); const c8 = pad.querySelector('.cpCell[data-i="8"]'); if (c8) { c8.classList.add("fire"); setTimeout(() => c8.classList.remove("fire"), 190); } } }
+    } else { lsModeSet("cpScale2", parseFloat(CP.scale2.toFixed(3))); applyPos2(); }
+    rzMode = null;
   }, { passive:false });
 
   // ── 설정: 옵션 토글 + 투명도 ──
