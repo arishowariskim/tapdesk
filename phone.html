@@ -2462,8 +2462,9 @@ if ($("exitCorner")) $("exitCorner").addEventListener("touchstart", function(e){
   function hideInd(){ if(ind){ ind.remove(); ind=null; } }
   document.addEventListener("touchstart",function(e){
     var t=e.touches[0];
-    // 상단 58px이라도 'PC화면(screenImg)' 위에서 시작할 때만 pull — 시계·버튼 등 위젯 위에선 무시(위젯 드래그 살림)
-    if(t && t.clientY<58 && t.clientX>58 && e.target && e.target.id==="screenImg"){ pY=t.clientY; pulling=false; e.stopPropagation(); }
+    // 상단 58px·좌상단 구석(나가기) 제외 + 위젯/버튼 위가 아니면 pull (PC화면·빈 영역에서 당기면 새로고침)
+    var onWidget = e.target && e.target.closest && e.target.closest('#clockW,#cpPad,#cpPalette,#brightW,#monEdgeDrawer,#zoomPanel,#vmouse,#cpTools1,.btn,.cpCell');
+    if(t && t.clientY<58 && t.clientX>58 && !onWidget){ pY=t.clientY; pulling=false; e.stopPropagation(); }
     else pY=-1;
   },{capture:true});
   document.addEventListener("touchmove",function(e){
@@ -5410,6 +5411,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
   }
   $("cpPalette").addEventListener("click", (e) => { if (e.target.id === "cpPalette") $("cpPalette").classList.remove("on"); });
   pad.querySelectorAll(".cpCell").forEach((cell) => {
+    if (cell.dataset.i === "4") return;   // 가운데 = 이동핸들 겸용(아래 별도 touch 핸들러)
     cell.addEventListener("click", (e) => {
       e.stopPropagation();
       const i = +cell.dataset.i;
@@ -5417,28 +5419,56 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
       else { const a = cpGrid[i]; if (a) { runAct(a); cell.classList.add("fire"); setTimeout(() => cell.classList.remove("fire"), 190); } }
     });
   });
+  // 🎯 가운데 칸(4) = 짧게 톡=기능 / 길게 누르면 패드 이동 (잡기 쉬운 가운데로 — 구석은 어려워서)
+  (function(){
+    const mid = pad.querySelector('.cpCell[data-i="4"]'); if (!mid) return;
+    let mvx, mvy, mvMode, mvLongT, mvGx, mvGy, mvTap;
+    mid.addEventListener("touchstart", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const t = e.touches[0];
+      mvx = t.clientX; mvy = t.clientY; mvMode = "tap"; mvTap = true;
+      mvGx = t.clientX - pad.offsetLeft; mvGy = t.clientY - pad.offsetTop;
+      mvLongT = setTimeout(() => { mvMode = "move"; mvTap = false; pad.classList.add("movemode"); if (navigator.vibrate) navigator.vibrate(32); toast("📍 이동 — 끌어서 위치"); }, 500);
+    }, { passive:false });
+    mid.addEventListener("touchmove", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const t = e.touches[0];
+      if (mvMode === "move") {
+        const w = 150 * CP.scale2;
+        pad.style.left = clamp(t.clientX - mvGx, 0, innerWidth  - w) + "px";
+        pad.style.top  = clamp(t.clientY - mvGy, 0, innerHeight - w) + "px";
+      } else if (Math.hypot(t.clientX - mvx, t.clientY - mvy) > 10) { mvTap = false; clearTimeout(mvLongT); }
+    }, { passive:false });
+    mid.addEventListener("touchend", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      clearTimeout(mvLongT);
+      if (mvMode === "move") {
+        pad.classList.remove("movemode");
+        pos2[scrMode()] = { rx:pad.offsetLeft/innerWidth, ry:pad.offsetTop/innerHeight };
+        localStorage.setItem("cpPos2", JSON.stringify(pos2));
+      } else if (mvTap) {
+        if (cpEdit) openPalette(4);
+        else { const a = cpGrid[4]; if (a) { runAct(a); mid.classList.add("fire"); setTimeout(() => mid.classList.remove("fire"), 190); } }
+      }
+      mvMode = null;
+    }, { passive:false });
+  })();
   $("cpEditBtn").addEventListener("click", (e) => { e.stopPropagation(); cpEdit = !cpEdit; renderGrid(); toast(cpEdit ? "✏️ 편집 — 칸 톡=기능 선택" : "🔒 고정 완료"); });
   renderGrid();
 
-  // 우하단 칸(투명 핸들 겸용): 탭=칸8 기능 / 꾹(길게)=이동 / 잡고 드래그=크기조절
-  let rzx, rzy, rzs, rzMode, rzLongT, rzGx, rzGy, rzTap;
+  // 우하단 칸(투명 핸들 겸용): 탭=칸8 기능 / 잡고 드래그=크기조절 (이동은 가운데 길게로 옮김 — 구석은 잡기 힘들어서)
+  let rzx, rzy, rzs, rzTap;
   const rzEl = $("cpPadResize");
   rzEl.addEventListener("touchstart", (e) => {
     e.preventDefault(); e.stopPropagation();
     const t = e.touches[0];
-    rzx = t.clientX; rzy = t.clientY; rzs = CP.scale2; rzMode = "size"; rzTap = true;
-    rzGx = t.clientX - pad.offsetLeft; rzGy = t.clientY - pad.offsetTop;
-    rzLongT = setTimeout(() => { rzMode = "move"; rzTap = false; pad.classList.add("movemode"); if (navigator.vibrate) navigator.vibrate(32); toast("📍 이동 — 끌어서 위치"); }, 500);
+    rzx = t.clientX; rzy = t.clientY; rzs = CP.scale2; rzTap = true;
   }, { passive:false });
   rzEl.addEventListener("touchmove", (e) => {
     e.preventDefault(); e.stopPropagation();
     const t = e.touches[0];
-    if (rzMode === "move") {
-      const w = 150 * CP.scale2;
-      pad.style.left = clamp(t.clientX - rzGx, 0, innerWidth  - w) + "px";
-      pad.style.top  = clamp(t.clientY - rzGy, 0, innerHeight - w) + "px";
-    } else if (Math.hypot(t.clientX - rzx, t.clientY - rzy) > 8) {
-      rzTap = false; clearTimeout(rzLongT);
+    if (Math.hypot(t.clientX - rzx, t.clientY - rzy) > 8) {
+      rzTap = false;
       CP.scale2 = clamp(rzs + (t.clientX - rzx) / 230, 0.7, 2.2);
       applyScale2();
       const w = 150 * CP.scale2;                          // 크기 키울 때 화면 밖으로 안 나가게 (벽에 붙임)
@@ -5448,16 +5478,10 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
   }, { passive:false });
   rzEl.addEventListener("touchend", (e) => {
     e.preventDefault(); e.stopPropagation();
-    clearTimeout(rzLongT);
-    if (rzMode === "move") {
-      pad.classList.remove("movemode");
-      pos2[scrMode()] = { rx:pad.offsetLeft/innerWidth, ry:pad.offsetTop/innerHeight };
-      localStorage.setItem("cpPos2", JSON.stringify(pos2));
-    } else if (rzTap) {                          // 짧은 탭 = 우하단 칸(8) 기능 (편집모드면 팔레트)
+    if (rzTap) {                          // 짧은 탭 = 우하단 칸(8) 기능 (편집모드면 팔레트)
       if (cpEdit) openPalette(8);
       else { const a = cpGrid[8]; if (a) { runAct(a); const c8 = pad.querySelector('.cpCell[data-i="8"]'); if (c8) { c8.classList.add("fire"); setTimeout(() => c8.classList.remove("fire"), 190); } } }
     } else { lsModeSet("cpScale2", parseFloat(CP.scale2.toFixed(3))); applyPos2(); }
-    rzMode = null;
   }, { passive:false });
 
   // ── 설정: 옵션 토글 + 투명도 ──
