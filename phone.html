@@ -429,7 +429,7 @@ html, body {
 /* 🖥 도크 안 모니터 썸네일 버튼 — 16:9 고정 */
 .monDockBtn { min-width:unset !important; width:58px; height:33px; padding:0; border-radius:6px; overflow:hidden; background-size:cover; background-position:center; background-color:rgba(18,21,34,.85); flex-shrink:0; }
 .monDockBtn .ico { display:none; }
-.monDockBtn::before { content:attr(data-num); position:absolute; top:2px; left:3px; font-size:9px; font-weight:bold; background:rgba(0,0,0,.65); color:#fff; padding:0 3px; border-radius:3px; line-height:14px; }
+.monDockBtn::before { content:none; position:absolute; top:2px; left:3px; font-size:9px; font-weight:bold; background:rgba(0,0,0,.65); color:#fff; padding:0 3px; border-radius:3px; line-height:14px; }
 .monDockBtn.active { border-color:var(--gold); box-shadow:0 0 8px rgba(227,184,120,.6); }
 /* 🔔 폰 알림 팝업 */
 #phoneNotifPopup {
@@ -520,7 +520,7 @@ html, body {
 /* 꺼낸 모니터 도크버튼 — floating 상태에서도 16:9 크기 유지 */
 .monDockBtn.floating { width:72px !important; height:41px !important; border-radius:8px !important; background-size:cover !important; background-position:center !important; }
 .monDockBtn.floating .ico { display:none; }
-.monDockBtn.floating::before { content:attr(data-num); position:absolute; top:3px; left:4px; font-size:10px; font-weight:bold; background:rgba(0,0,0,.65); color:#fff; padding:0 3px; border-radius:3px; line-height:14px; }
+.monDockBtn.floating::before { content:none; position:absolute; top:3px; left:4px; font-size:10px; font-weight:bold; background:rgba(0,0,0,.65); color:#fff; padding:0 3px; border-radius:3px; line-height:14px; }
 #lteBtn.auto {
   color:#06210a; background:#5fd06a; border-color:#5fd06a;
   box-shadow:0 0 12px rgba(95,208,106,.6);
