@@ -26,3 +26,19 @@ _복귀지점_*/
 autobackup.*
 watchdog.*
 camera_mouse.html
+
+# [2026-07-05 보안·용량 가드]
+_ts.key
+_ts.crt
+*.apk
+_app/
+_bak_apk/
+_bak_folders/
+_bak_phone/
+_bak_server/
+_archive/
+_dev/
+_통백업_*/
+*.h264
+*.bgra
+_profile/

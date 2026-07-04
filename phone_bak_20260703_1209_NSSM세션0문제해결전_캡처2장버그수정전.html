@@ -1147,25 +1147,6 @@ html, body {
     </div>
 
     <div class="row" style="margin-bottom:14px;">
-      <label style="font-size:13px;font-weight:600;">🚀 터보 엔진 <span id="turboState" style="color:#787e92;font-size:10.5px;">— 4K H.264 실시간 (지원 환경에서만)</span></label>
-      <div class="cpSeg">
-        <button class="cpSegBtn" id="turboBtnOff" style="font-size:13px;padding:10px 0;">끔 (기존 방식)</button>
-        <button class="cpSegBtn" id="turboBtnOn"  style="font-size:13px;padding:10px 0;">켬 (4K·60fps)</button>
-      </div>
-      <div class="grid2" id="turboOpts" style="margin-top:6px;">
-        <div class="cpSeg">
-          <button class="cpSegBtn" id="turboF30" style="font-size:12px;padding:8px 0;">30fps</button>
-          <button class="cpSegBtn" id="turboF60" style="font-size:12px;padding:8px 0;">60fps</button>
-        </div>
-        <div class="cpSeg">
-          <button class="cpSegBtn" id="turboB8"  style="font-size:12px;padding:8px 0;">8M</button>
-          <button class="cpSegBtn" id="turboB12" style="font-size:12px;padding:8px 0;">12M</button>
-          <button class="cpSegBtn" id="turboB20" style="font-size:12px;padding:8px 0;">20M</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="row" style="margin-bottom:14px;">
       <label style="font-size:13px;font-weight:600;">줌 방식</label>
       <div class="cpSeg">
         <button class="cpSegBtn" id="zoomModeFast"    style="font-size:13px;padding:10px 0;">빠른줌</button>
@@ -1525,118 +1506,18 @@ function flushFrame() {
   drawScheduled = false;
   if (!pendingBmp) return;
   const bmp = pendingBmp; pendingBmp = null;
-  // 🚀 터보(H.264): 서버는 항상 모니터 풀프레임 → viewRect 크롭을 여기(로컬)서 그림.
-  // 줌인/아웃/pan = 서버 왕복 0 (다음 프레임 16~33ms에 반영) — 애니데스크급 즉답 줌의 핵심.
-  const isVF = (typeof VideoFrame !== "undefined") && (bmp instanceof VideoFrame);
-  const fw = isVF ? bmp.displayWidth : bmp.width, fh = isVF ? bmp.displayHeight : bmp.height;
-  let sx = 0, sy = 0, sw = fw, sh = fh;
-  if (isVF) {
-    const v = viewRect();
-    sx = Math.round(v.rx1 * fw); sy = Math.round(v.ry1 * fh);
-    sw = Math.max(16, Math.round((v.rx2 - v.rx1) * fw));
-    sh = Math.max(10, Math.round((v.ry2 - v.ry1) * fh));
-    if (sx + sw > fw) sx = Math.max(0, fw - sw);
-    if (sy + sh > fh) sy = Math.max(0, fh - sh);
-  }
-  // 🚀 터보 렌더: 캔버스 내부 해상도를 표시픽셀에 "고정" — 줌 중 매프레임 캔버스 재할당이
-  // 안드로이드 GPU 미초기화 버퍼(빨간 프레임 번쩍)의 원인 (2026-07-03 실증). 줌은 소스영역만 변경.
-  let dw = sw, dh = sh;
-  if (isVF) {
-    const cssW = screenImg.clientWidth || 1080;
-    const maxW = Math.ceil(cssW * (window.devicePixelRatio || 1));
-    dw = maxW;
-    dh = Math.max(10, Math.round(maxW * sh / sw));
-    // 미세 흔들림 히스테리시스 — 8px 이내 변화는 기존 크기 유지(재할당 0)
-    if (canvasNW && Math.abs(dw - canvasNW) <= 8 && Math.abs(dh - canvasNH) <= 8) { dw = canvasNW; dh = canvasNH; }
-  }
-  if (dw !== canvasNW || dh !== canvasNH) {   // 해상도 바뀔 때만 width 대입(매번 하면 캔버스가 지워져 오히려 번쩍)
-    screenImg.width = dw; screenImg.height = dh;
-    canvasNW = dw; canvasNH = dh;
+  if (bmp.width !== canvasNW || bmp.height !== canvasNH) {   // 해상도 바뀔 때만 width 대입(매번 하면 캔버스가 지워져 오히려 번쩍)
+    screenImg.width = bmp.width; screenImg.height = bmp.height;
+    canvasNW = bmp.width; canvasNH = bmp.height;
     placeCursor();
   }
-  if (isVF) screenCtx.drawImage(bmp, sx, sy, sw, sh, 0, 0, dw, dh);
-  else screenCtx.drawImage(bmp, 0, 0);   // JPEG 경로 — 기존 그대로 (이전 픽셀 위 덮어쓰기 = blank 없음)
-  bmp.close();                           // ImageBitmap·VideoFrame 메모리 즉시 해제(필수)
+  screenCtx.drawImage(bmp, 0, 0);        // 이전 프레임 위 덮어쓰기 = blank 없음
+  bmp.close();                           // ImageBitmap 메모리 즉시 해제(필수)
   if (pinchPreview && !pinchActive) {    // [쇼바] 핀치 끝 + 새 crop 도착 → CSS 부드럽게 해제
     screenImg.style.transition = "transform .12s ease-out";
     screenImg.style.transform = "";
     pinchPreview = false;
   }
-}
-
-// ───── 🚀 터보 엔진 (H.264 NVENC → WebCodecs 하드웨어 디코드) ─────
-// 조건: 보안컨텍스트(https/wss) + VideoDecoder 지원. 아니면 기존 JPEG 그대로(0 수정).
-// 프로토콜: 서버 {"turbo_start",w,h,fps} 후 바이너리 "V264"+key(1B)+AnnexB AU.
-let turboOn = localStorage.getItem("turboOn") === "1";
-let turboFps = parseInt(localStorage.getItem("turboFps") || "30");     // 30 기본 — 텍스트 선명도(비트/프레임)↑, 60은 옵션
-let turboKbps = parseInt(localStorage.getItem("turboKbps") || "20000"); // 20M 기본 — 4K 글자 뭉개짐 방지
-let turboRun = false;              // 서버가 H.264 송출 중
-let vdec = null, vdecOK = false, vdecTs = 0, turboWaitKey = false;
-
-function turboCapable() { return window.isSecureContext && typeof VideoDecoder !== "undefined"; }
-
-function sendTurboPref() {         // 연결 직후·토글 변경 시 서버에 의사 전달
-  if (!ws || ws.readyState !== 1) return;
-  if (turboOn && turboCapable()) send({ type:"turbo_mode", on:true, fps:turboFps, kbps:turboKbps });
-  else send({ type:"turbo_mode", on:false });
-}
-
-function turboTeardown(msg) {
-  turboRun = false; vdecOK = false;
-  try { if (vdec) vdec.close(); } catch (e) {}
-  vdec = null;
-  if (msg) toast(msg);
-}
-
-function _findNal(u8, want) {      // AnnexB에서 NAL타입 want의 본문(시작코드 뒤~다음 시작코드) 반환
-  for (let i = 0; i + 3 < u8.length; i++) {
-    if (u8[i] === 0 && u8[i + 1] === 0 && (u8[i + 2] === 1 || (u8[i + 2] === 0 && u8[i + 3] === 1))) {
-      const s = i + (u8[i + 2] === 1 ? 3 : 4);
-      if (s < u8.length && (u8[s] & 0x1f) === want) {
-        let e = u8.length;
-        for (let j = s + 1; j + 3 < u8.length; j++) {
-          if (u8[j] === 0 && u8[j + 1] === 0 && (u8[j + 2] === 1 || (u8[j + 2] === 0 && u8[j + 3] === 1))) { e = j; break; }
-        }
-        return u8.subarray(s, e);
-      }
-      i = s - 1;                   // 이 NAL 건너뛰고 다음 시작코드부터
-    }
-  }
-  return null;
-}
-
-function turboFeed(u8, isKey) {
-  if (!turboCapable()) return;
-  try {
-    if (!vdecOK) {
-      if (!isKey) return;          // 디코더 초기화는 키프레임(SPS 포함)에서만
-      const sps = _findNal(u8, 7);
-      if (!sps || sps.length < 4) return;
-      const codec = "avc1." + [sps[1], sps[2], sps[3]].map(b => b.toString(16).padStart(2, "0")).join("");
-      vdec = new VideoDecoder({
-        output: (f) => {           // VideoFrame → 기존 pendingBmp 파이프에 그대로 합류
-          if (pendingBmp) pendingBmp.close();
-          pendingBmp = f;
-          revealSplash();
-          if (!drawScheduled) { drawScheduled = true; requestAnimationFrame(flushFrame); }
-        },
-        error: (e) => {            // 디코더 사망 → 자동 JPEG 복귀 (안전 폴백)
-          turboTeardown("터보 디코더 오류 → 일반 모드 복귀");
-          turboOn = false; localStorage.setItem("turboOn", "0");
-          sendTurboPref();
-          if (typeof renderTurboUI === "function") renderTurboUI();
-        }
-      });
-      vdec.configure({ codec: codec, optimizeForLatency: true });   // description 없음 = AnnexB 모드
-      vdecOK = true;
-    }
-    // 밀림 처리: P프레임은 참조체인이라 하나만 버려도 다음 키까지 다 깨짐 → GOP 통째 스킵
-    if (isKey) turboWaitKey = false;
-    else if (turboWaitKey) return;
-    else if (vdec.decodeQueueSize > 6) { turboWaitKey = true; return; }
-    vdec.decode(new EncodedVideoChunk({ type: isKey ? "key" : "delta",
-                                        timestamp: (vdecTs += 16000), data: u8 }));
-  } catch (e) { turboTeardown(); }
 }
 
 let ws = null, wsAud = null, monitors = [], curMon = 1;
@@ -2316,11 +2197,6 @@ function onMessage(ev) {
       playAudio(new Int16Array(buf.slice(3)));
       return;
     }
-    if (h[0] === 86 && h[1] === 50 && h[2] === 54) {  // "V26"("V264") = 🚀 터보 H.264 프레임 [4B매직+1B키+AnnexB]
-      const u8 = new Uint8Array(buf);
-      if (u8.length > 5) turboFeed(u8.subarray(5), u8[4] === 1);
-      return;
-    }
     // 🖼 canvas 렌더: createImageBitmap(논블로킹 디코드) → rAF에서 drawImage → close. img.src 번쩍 제거.
     const seq = ++frameSeq;
     createImageBitmap(new Blob([buf])).then((bmp) => {
@@ -2334,7 +2210,7 @@ function onMessage(ev) {
     return;
   }
   let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-  if (m.type === "auth_ok" || m.type === "relay_ok") { setStatus(true); sendView(true); send({ type:"lte_mode", on:netLow() }); if (sndOn) send({ type:"audio_mode", on:true }); if (clipWatch) send({ type:"clip_watch", on:true }); connectAudio(); sendTurboPref();
+  if (m.type === "auth_ok" || m.type === "relay_ok") { setStatus(true); sendView(true); send({ type:"lte_mode", on:netLow() }); if (sndOn) send({ type:"audio_mode", on:true }); if (clipWatch) send({ type:"clip_watch", on:true }); connectAudio();
     try { if (localStorage.getItem("justReloaded")) { localStorage.removeItem("justReloaded"); setTimeout(() => toast("새로고침", 4000), 700); } } catch(e) {}
     try { const _dbg = localStorage.getItem("_gsDbg"); if (_dbg) { localStorage.removeItem("_gsDbg"); const d = JSON.parse(_dbg); const _sm = scrMode(); const _zo = JSON.parse(localStorage.getItem("zOrderAll") || "{}"); const _n = _zo[_sm] !== undefined ? _zo[_sm].length : "?"; setTimeout(() => toast("📊 " + _sm + "슬롯=" + _n + " spread=" + d.n + "키 Lo저장=" + d.lo, 8000), 1400); } } catch(e) {} }   // 새로고침 직후 알림 (연결 완료 후라 안 덮임)
   else if (m.type === "restore_settings") {
@@ -2343,9 +2219,6 @@ function onMessage(ev) {
         Object.entries(m.data).forEach(([k,v]) => {
           localStorage.setItem(k, typeof v === "string" ? v : JSON.stringify(v));
         });
-        // 🩹 lsReady를 여태 아무데도 안 찍어서, 서버가 접속마다(매번) restore_settings를 보내는 것과
-        //   맞물려 "복원→새로고침→재접속→복원→새로고침…" 무한루프가 나던 버그 (대표님 지시 2026-07-04, "TapDesk 안 열림")
-        localStorage.setItem("lsReady", "1");
         doReloadAnim(() => location.reload());
       }
     } catch(e) {}
@@ -2355,29 +2228,6 @@ function onMessage(ev) {
   else if (m.type === "rec_stop") { if (m.who !== "phone" && recording) { stopRec(); toast("바탕 마이크로 전환"); } }   // 바탕 버블이 녹음 켜면 폰 녹음 자동 끔 (상호배타)
   else if (m.type === "clip_add") { addClip(m.text, m.label); }   // 🗒 복사 버튼/드롭박스 → 자체 보관함 적재(label=파일명)
   else if (m.type === "toast") { toast(m.text); }                 // 서버 알림(긁어복사 입고 등)
-  else if (m.type === "turbo_start") {   // 🚀 서버가 H.264 송출 시작(인코더 세대 교체) → 디코더 리셋
-    turboRun = true; vdecOK = false; vdecTs = 0; turboWaitKey = false;
-    try { if (vdec) vdec.close(); } catch (e) {}
-    vdec = null;
-  }
-  else if (m.type === "turbo_ok") {      // 서버 터보 상태 확인 응답
-    if (!m.on) turboTeardown();
-    if (!m.on && m.persist) {            // 🎛 원격 강제 OFF — 폰 저장값까지 끔 (LTE 데이터 보호, 재접속 자동재점화 차단)
-      turboOn = false; try { localStorage.setItem("turboOn", "0"); } catch (e) {}
-    }
-    if (typeof renderTurboUI === "function") renderTurboUI();
-  }
-  else if (m.type === "turbo_probe") {   // 🎨 자동 색검증 — 서버 원본 중앙색 vs 내 캔버스 중앙색 회신 (사용자 손 0)
-    setTimeout(() => { try {
-      if (!turboRun || !canvasNW) return;
-      const d = screenCtx.getImageData(Math.floor(canvasNW / 2), Math.floor(canvasNH / 2), 4, 4).data;
-      let r = 0, g = 0, b = 0;
-      for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i+1]; b += d[i+2]; }
-      const n = d.length / 4, got = [Math.round(r/n*10)/10, Math.round(g/n*10)/10, Math.round(b/n*10)/10];
-      const dd = Math.max(Math.abs(got[0]-m.rgb[0]), Math.abs(got[1]-m.rgb[1]), Math.abs(got[2]-m.rgb[2]));
-      send({ type:"turbo_probe_result", src:m.rgb, got:got, d:Math.round(dd*10)/10 });
-    } catch (e) {} }, 250);
-  }
   else if (m.type === "monitors") { monitors = m.list || []; if (m.cur) { const nk = m.curKey || ((monitors.find(x => x.id === m.cur) || {}).key) || ""; const ch = (m.cur !== curMon) || (nk !== curKey); curMon = m.cur; curKey = nk; if (ch) view = Object.assign({}, curView()); } renderMonBar(); if (typeof markPresets === "function") markPresets(); sendView(true);
     // 저장된 모니터 복원 — 새로고침 후 서버와 다르면 재전환
     const _saved = parseInt(localStorage.getItem("savedMon") || "0");
@@ -2443,21 +2293,10 @@ function connect() {
     // WS 재연결 시 최신 로컬 설정 → 서버 즉시 동기화 (디바운스 타이머가 끊기면 유실되는 문제 방지)
     setTimeout(() => { if (typeof window._pushAllSettings === "function") window._pushAllSettings(); }, 200);
   };
-  ws.onmessage = (ev) => { lastWsMsgAt = Date.now(); onMessage(ev); };
+  ws.onmessage = onMessage;
   ws.onclose = () => { setStatus(false); setTimeout(connect, 500); };   // 1.2s → 0.5s
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
-
-// 💓 반송장 연결 백신 (2026-07-04) — LTE 기지국 변경 등으로 소켓이 "죽었는데 죽은 줄 모르는" 상태가 되면
-// 화면 정지+터치 무반응(실증). 썸네일(5초 주기) 등 서버 소식이 12초 없으면 죽은 관 판정 → 강제 재접속.
-let lastWsMsgAt = Date.now();
-setInterval(() => {
-  if (ws && ws.readyState === 1 && Date.now() - lastWsMsgAt > 12000) {
-    lastWsMsgAt = Date.now();          // 재판정 쿨다운
-    try { ws.close(); } catch (e) {}   // onclose → 0.5초 후 자동 재접속
-  }
-}, 3000);
-
 function connectAudio() {
   if (wsAud && wsAud.readyState <= 1) return;   // 이미 연결 중·완료
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -5890,47 +5729,6 @@ if ($("zoomModeFast"))    $("zoomModeFast").addEventListener("click",    () => {
 if ($("zoomModeOptimal")) $("zoomModeOptimal").addEventListener("click", () => { zoomMode = "optimal"; localStorage.setItem("zoomMode","optimal"); updateZoomModeBtns(); toast("최적줌"); });
 if ($("zoomModeStable"))  $("zoomModeStable").addEventListener("click",  () => { zoomMode = "stable";  localStorage.setItem("zoomMode","stable");  updateZoomModeBtns(); toast("안정줌"); });
 updateZoomModeBtns();
-
-// ───── 🚀 터보 엔진 설정 배선 ─────
-function renderTurboUI() {
-  if (!$("turboBtnOn")) return;
-  $("turboBtnOn").classList.toggle("active", turboOn);
-  $("turboBtnOff").classList.toggle("active", !turboOn);
-  $("turboF30").classList.toggle("active", turboFps === 30);
-  $("turboF60").classList.toggle("active", turboFps === 60);
-  $("turboB8").classList.toggle("active", turboKbps === 8000);
-  $("turboB12").classList.toggle("active", turboKbps === 12000);
-  $("turboB20").classList.toggle("active", turboKbps === 20000);
-  const st = $("turboState");
-  if (st) {
-    if (!turboCapable()) st.textContent = "— 이 접속(http)은 미지원 · wss 접속 필요";
-    else st.textContent = turboOn ? "— 🟢 4K H.264 " + turboFps + "fps " + (turboKbps/1000) + "Mbps" : "— 4K H.264 실시간";
-  }
-}
-function setTurbo(on) {
-  if (on && !turboCapable()) {
-    toast(typeof VideoDecoder === "undefined" ? "이 웹뷰는 WebCodecs 미지원" : "https(wss) 접속에서만 가능 — 앱 업데이트 필요");
-    renderTurboUI(); return;
-  }
-  turboOn = on; localStorage.setItem("turboOn", on ? "1" : "0");
-  if (!on) turboTeardown();
-  sendTurboPref(); renderTurboUI();
-  toast(on ? "🚀 터보 ON — 4K " + turboFps + "fps" : "터보 OFF — 기존 방식 복귀");
-}
-function setTurboOpt(fps, kbps) {
-  if (fps) { turboFps = fps; localStorage.setItem("turboFps", String(fps)); }
-  if (kbps) { turboKbps = kbps; localStorage.setItem("turboKbps", String(kbps)); }
-  if (turboOn) sendTurboPref();   // 켜져 있으면 서버 인코더 즉시 재기동
-  renderTurboUI();
-}
-if ($("turboBtnOn"))  $("turboBtnOn").addEventListener("click",  () => setTurbo(true));
-if ($("turboBtnOff")) $("turboBtnOff").addEventListener("click", () => setTurbo(false));
-if ($("turboF30")) $("turboF30").addEventListener("click", () => setTurboOpt(30, 0));
-if ($("turboF60")) $("turboF60").addEventListener("click", () => setTurboOpt(60, 0));
-if ($("turboB8"))  $("turboB8").addEventListener("click",  () => setTurboOpt(0, 8000));
-if ($("turboB12")) $("turboB12").addEventListener("click", () => setTurboOpt(0, 12000));
-if ($("turboB20")) $("turboB20").addEventListener("click", () => setTurboOpt(0, 20000));
-renderTurboUI();
 
 // ───── 도크 버튼 플로팅 — 위로 끌어올려 화면으로 / 도크에 끌어내려 복귀 ─────
 let floatSyncMode = localStorage.getItem("floatSync") === "1";

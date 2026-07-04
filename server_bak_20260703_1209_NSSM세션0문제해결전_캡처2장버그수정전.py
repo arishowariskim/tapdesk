@@ -78,7 +78,6 @@ ICON_FILE = CANONICAL / "icon.png"
 LOG_FILE = CANONICAL / "agent.log"
 
 PORT = int(os.environ.get("PORT", 7780))
-TLS_PORT = int(os.environ.get("TLS_PORT", 7443))   # wss(터보 WebCodecs용) — _ts.crt/_ts.key 있을 때만
 FPS = 30            # dxcam GPU 캡처 → 30fps 가능
 MAX_WIDTH = 1600
 JPEG_QUALITY = 55
@@ -111,16 +110,6 @@ logging.basicConfig(
               logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("fold5")
-
-# 🛩 블랙박스 — 네이티브 급사(액세스 위반 등) 시 전 스레드 스택을 남김 (2026-07-04 원인불명 프로세스 사망 추적)
-import faulthandler
-try:
-    _crash_f = open(CANONICAL / "_crash_trace.log", "a", encoding="utf-8", errors="replace")
-    _crash_f.write(f"\n===== 기동 {time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()} =====\n")
-    _crash_f.flush()
-    faulthandler.enable(_crash_f, all_threads=True)
-except Exception:
-    pass
 
 # 소리 — PC 시스템 사운드 캡처 (WASAPI 루프백) → 큐 → 폰
 audio_q: "queue.Queue" = queue.Queue(maxsize=8)    # /ws 폴백 채널
@@ -355,115 +344,47 @@ def get_mss() -> "mss.MSS":
     return inst
 
 
-# dxcam 멀티-GPU 레지스트리 (GPU DDA 캡처)
-# [실측 2026-07-03] 외장 4K 2대는 device_idx=1 (별도 어댑터) — 기존엔 primary만 dxcam이라
-# 외장 모니터가 전부 mss(148ms)로 갔음. 데스크톱 좌표→(device,output) 매핑으로 전 모니터 GPU 캡처.
-# dxcam Device1 실측 0.2ms/호출. 매핑 실패·에러 시 mss 폴백 (기존과 동일).
+# dxcam 싱글턴 (GPU DDA 캡처 — mss 대비 10배 빠름)
+# 주의: dxcam은 output_idx 별로 별도 인스턴스가 필요하지만,
+# 노트북(1번) 이외 모니터는 mss로 안전하게 처리
 try:
     import dxcam as _dxcam_mod
 except Exception as _dxcam_import_err:
     _dxcam_mod = None  # COM 오류 등 — mss 폴백
-_dxcam_inst = None                # (구 호환) primary 인스턴스 별칭
-_dxcam_insts = {}                 # (device_idx, output_idx) -> 인스턴스 | "FAIL"
-_dxcam_rects = None               # [(left, top, right, bottom, dev, out), ...] | "FAIL"
+_dxcam_inst = None
 _dxcam_lock = threading.Lock()
-_dx_grab_lock = threading.Lock()  # grab 직렬화 — 같은 인스턴스 동시 grab = D3D INVALID_CALL (2026-07-03 실증)
 
 # turbojpeg 싱글턴 (PIL WebP 대비 5배 빠른 JPEG 인코딩)
 from turbojpeg import TurboJPEG, TJPF_RGB, TJPF_BGRA
 _turbo_jpeg = TurboJPEG()
 
 
-def _dxcam_rect_map():
-    """DXGI 어댑터·출력 열거 → 데스크톱 절대좌표 매핑. 1회 캐시."""
-    global _dxcam_rects
-    if _dxcam_rects is not None:
-        return [] if _dxcam_rects == "FAIL" else _dxcam_rects
-    try:
-        from dxcam.util.io import enum_dxgi_adapters, enum_dxgi_outputs
-        from dxcam.core import Output
-        rects = []
-        for di, ad in enumerate(enum_dxgi_adapters()):
-            try:
-                for oi, po in enumerate(enum_dxgi_outputs(ad)):
-                    r = Output(po).desc.DesktopCoordinates
-                    rects.append((r.left, r.top, r.right, r.bottom, di, oi))
-            except Exception:
-                continue
-        _dxcam_rects = rects if rects else "FAIL"
-        if rects:
-            log.info("🗺 dxcam 모니터 맵: " + ", ".join(
-                f"dev{d}out{o}=({l},{t})" for l, t, _, _, d, o in rects))
-        return rects
-    except Exception as e:
-        log.warning(f"dxcam 맵 열거 실패 → mss 폴백: {e}")
-        _dxcam_rects = "FAIL"
-        return []
-
-
-def _dxcam_reset():
-    """캡처 연속 실패 시 재초기화 — 전 인스턴스·맵 폐기 후 다음 호출 때 재생성."""
-    global _dxcam_inst, _dxcam_insts, _dxcam_rects
-    with _dxcam_lock:
-        for v in list(_dxcam_insts.values()):
-            try:
-                if v not in (None, "FAIL"):
-                    del v
-            except Exception:
-                pass
-        _dxcam_insts = {}
-        _dxcam_inst = None
-        _dxcam_rects = None
-
-
-def get_dxcam_for(mon: dict):
-    """모니터 dict(left/top/width/height) → (dxcam 인스턴스, 출력원점x, 출력원점y).
-    해당 모니터가 dxcam 출력에 정확히 매칭될 때만 인스턴스 반환, 아니면 (None,0,0)=mss 폴백."""
-    if _dxcam_mod is None:
-        return None, 0, 0
-    tgt = None
-    for l, t, r, b, di, oi in _dxcam_rect_map():
-        if l == mon["left"] and t == mon["top"] and (r - l) == mon["width"] and (b - t) == mon["height"]:
-            tgt = (di, oi, l, t)
-            break
-    if tgt is None:
-        return None, 0, 0
-    di, oi, ox, oy = tgt
-    key = (di, oi)
-    inst = _dxcam_insts.get(key)
-    if inst == "FAIL":
-        return None, 0, 0
-    if inst is not None:
-        return inst, ox, oy
-    with _dxcam_lock:
-        inst = _dxcam_insts.get(key)
-        if inst == "FAIL":
-            return None, 0, 0
-        if inst is not None:
-            return inst, ox, oy
-        try:
-            inst = _dxcam_mod.create(device_idx=di, output_idx=oi, output_color="BGRA")
-            if inst is None:
-                _dxcam_insts[key] = "FAIL"
-                return None, 0, 0
-            _dxcam_insts[key] = inst
-            log.info(f"⚡ dxcam 활성화 dev{di}/out{oi} origin=({ox},{oy}) — GPU DDA 캡처")
-            return inst, ox, oy
-        except Exception as e:
-            log.warning(f"dxcam 생성 실패 dev{di}/out{oi} → mss 폴백: {e}")
-            _dxcam_insts[key] = "FAIL"
-            return None, 0, 0
-
-
 def get_dxcam():
-    """(구 호환) primary(0,0) dxcam. 신규 코드는 get_dxcam_for(mon) 사용."""
+    """primary(0,0) 모니터 전용 dxcam 싱글턴 — BGRA 모드(cv2 의존 회피).
+    실패 시 None → mss 폴백. primary 외 모니터는 grab_region의 use_dxcam 조건이 걸러 mss로 감.
+    [측정 2026-06-23] mss 캡처 112ms vs dxcam 4.4ms = 25배."""
     global _dxcam_inst
-    for m in get_mss().monitors[1:]:
-        if m["left"] == 0 and m["top"] == 0:
-            cam, _, _ = get_dxcam_for(m)
-            _dxcam_inst = cam
-            return cam
-    return None
+    if _dxcam_mod is None:  # import 자체 실패 시 mss 폴백
+        return None
+    if _dxcam_inst == "FAIL":
+        return None
+    if _dxcam_inst is not None:
+        return _dxcam_inst
+    with _dxcam_lock:
+        if _dxcam_inst == "FAIL":
+            return None
+        if _dxcam_inst is not None:
+            return _dxcam_inst
+        try:
+            inst = _dxcam_mod.create(output_idx=0, output_color="BGRA")  # BGRA = cv2 불필요
+            if inst is None:
+                _dxcam_inst = "FAIL"; return None
+            _dxcam_inst = inst
+            log.info("⚡ dxcam 활성화 (output_idx=0, BGRA) — 캡처 ~4ms (mss 대비 25배)")
+            return inst
+        except Exception as e:
+            log.warning(f"dxcam 생성 실패 → mss 폴백: {e}")
+            _dxcam_inst = "FAIL"; return None
 
 
 # ── 모니터 고정 식별 (자리가 아니라 ID) — 노트북 항상 1번 + 결정적 순서 → 깜빡임 제거 ──
@@ -769,14 +690,13 @@ def grab_region(view: dict, last_hash):
     import numpy as _np
     m = _mon(STATE["monitor"])
     box = crop_box(view)
-    # [2026-07-03] 전 모니터 dxcam GPU 캡처 — 좌표맵으로 (device,output) 매칭, 실패 시 mss 폴백.
-    cam, _ox, _oy = get_dxcam_for(m)
+    # dxcam은 primary monitor(origin=0,0)에서만 사용. 그 외는 mss.
+    use_dxcam = (m["left"] == 0 and m["top"] == 0)
+    cam = get_dxcam() if use_dxcam else None
     if cam is not None:
-        # dxcam region은 해당 출력 원점 기준 상대좌표. BGRA (H,W,4)
-        region = (box["left"] - _ox, box["top"] - _oy,
-                  box["left"] - _ox + box["width"], box["top"] - _oy + box["height"])
-        with _dx_grab_lock:
-            raw_np = cam.grab(region=region)
+        # dxcam: GPU DDA 캡처 (primary 한정) — region은 (0,0) 기준 상대좌표. BGRA (H,W,4)
+        region = (box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"])
+        raw_np = cam.grab(region=region)
         if raw_np is None:
             return None, last_hash              # dxcam이 변화 없으면 None 반환 (정지화면 스킵)
         arr = raw_np                            # 이미 BGRA numpy — 변환 0
@@ -802,238 +722,6 @@ def grab_region(view: dict, last_hash):
     data = _turbo_jpeg.encode(arr, quality=quality, pixel_format=TJPF_BGRA)
     _frame_measure(len(data), arr.shape[1], arr.shape[0], lte, (time.time() - _t0) * 1000)
     return data, h
-
-
-# ───────────────────────── 🚀 터보 엔진 (H.264 NVENC → 폰 WebCodecs) ─────────────────────────
-# [2026-07-03 실측] 4090 NVENC 4K60=166fps(프레임당 6ms) · 폰 LTE Tailscale 직결 RTT 44ms.
-# 원칙: 기존 JPEG 경로 0수정 동결. 폰이 {"type":"turbo_mode","on":true}를 보낼 때만 lazy 전환.
-# 모니터 풀프레임(네이티브 해상도)을 항상 보냄 → 폰 줌인/아웃 = canvas 변환만(서버 왕복 0).
-import subprocess as _sp
-import shutil as _shutil
-
-TURBO_FPS = 30
-TURBO_KBPS = 20000     # 4K 텍스트 선명도 확보 — LTE 직결(다운 50~150Mbps) 여유 안
-_FFMPEG = _shutil.which("ffmpeg") or (
-    r"C:\Users\GAPER\AppData\Local\Microsoft\WinGet\Packages"
-    r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin\ffmpeg.exe")
-
-_AU_START3 = b"\x00\x00\x01"
-
-
-def _iter_nals(buf: bytes):
-    """Annex-B 버퍼 → (nal_start_offset, nal_type) 목록. 마지막 NAL은 다음 시작코드 없어 미완 취급."""
-    out = []
-    i = buf.find(_AU_START3)
-    while i != -1:
-        s = i - 1 if i > 0 and buf[i - 1] == 0 else i   # 4바이트 시작코드(00 00 00 01) 보정
-        j = buf.find(_AU_START3, i + 3)
-        ntype = buf[i + 3] & 0x1F if i + 3 < len(buf) else -1
-        out.append((s, ntype))
-        i = j
-    return out
-
-
-class _TurboEncoder:
-    """dxcam 풀프레임 → ffmpeg NVENC 저지연 파이프 → Annex-B AU(프레임) 큐.
-    AUD(NAL 9) 삽입으로 AU 경계 결정적 파싱. 소비자 5초 없으면 자가 종료(누수 방지)."""
-
-    def __init__(self, mon: dict, fps: int, kbps: int):
-        self.mon = dict(mon)
-        self.fps = int(fps)
-        self.kbps = int(kbps)
-        self.w = mon["width"] & ~1
-        self.h = mon["height"] & ~1
-        self.au_q: "queue.Queue" = queue.Queue(maxsize=8)
-        self.alive = True
-        self.last_get = time.time()
-        self._dropping = False   # 큐 포화로 드랍 시작 → 다음 키프레임까지 통째 스킵(참조체인 보호)
-        self.last_frame = None   # 최근 원본 프레임(BGRA) — 🎨 색검증 프로브용
-        # [2026-07-04 실측] bufsize=1프레임분(0.03초)이면 키프레임이 굶어 1초마다 연붉은 펄스(R-G 진폭 7.0).
-        # 버퍼 1초 + GOP 4초 + spatial-aq → 펄스 진폭 0.0 (lab2_pulse.py 실측)
-        bufsize_k = self.kbps
-        # [2026-07-03 색보정] RGB→YUV를 BT.709로 변환하고 스트림에 명시 태깅.
-        # 무표기면 폰 디코더가 601/709를 추측 → 검정이 붉게 뜨는 색틀어짐(실증). 범위도 limited로 통일.
-        # 화질: p1→p4(4090이면 4K60도 여유), baseline→high(CABAC ~15% 효율), g=1초(밀림 복구 빠르게).
-        cmd = [_FFMPEG, "-hide_banner", "-loglevel", "error",
-               "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{self.w}x{self.h}",
-               "-r", str(self.fps), "-i", "pipe:0",
-               # [2026-07-03 2차] limited(tv)로 보냈더니 폰 디코더가 범위깃발 무시+full 해석 → 검정 들뜸(햇빛 워시).
-               # full로 인코딩하면 디코더가 어느 쪽으로 읽어도 검정=0 유지 (틀려도 하이라이트만 살짝 눌림 = 안전한 실패)
-               "-vf", "scale=out_color_matrix=bt709:out_range=full",
-               "-pix_fmt", "yuv420p",
-               "-color_range", "pc", "-colorspace", "bt709",
-               "-color_primaries", "bt709", "-color_trc", "bt709",
-               "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ull",
-               "-profile:v", "high", "-bf", "0", "-g", str(self.fps * 4),
-               "-spatial-aq", "1", "-aq-strength", "8",
-               "-b:v", f"{self.kbps}k", "-maxrate", f"{self.kbps}k",
-               "-bufsize", f"{bufsize_k}k",
-               "-bsf:v", ("h264_metadata=aud=insert:colour_primaries=1"
-                          ":transfer_characteristics=1:matrix_coefficients=1"
-                          ":video_full_range_flag=1"),   # VUI 강제 — full range 명시(폰 색해석 고정)
-               "-flush_packets", "1", "-f", "h264", "pipe:1"]
-        self._errf = open(CANONICAL / "_turbo_ffmpeg_err.log", "ab")   # 사인 규명용 (DEVNULL 금지)
-        self.proc = _sp.Popen(cmd, stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=self._errf,
-                              creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
-        threading.Thread(target=self._cap_loop, daemon=True).start()
-        threading.Thread(target=self._read_loop, daemon=True).start()
-        log.info(f"🚀 터보 인코더 기동: {self.w}x{self.h}@{self.fps}fps {self.kbps}kbps "
-                 f"mon=({mon['left']},{mon['top']})")
-
-    def matches(self, mon: dict, fps: int, kbps: int) -> bool:
-        return (self.mon.get("left") == mon.get("left") and self.mon.get("top") == mon.get("top")
-                and self.w == (mon["width"] & ~1) and self.h == (mon["height"] & ~1)
-                and self.fps == int(fps) and self.kbps == int(kbps))
-
-    def stop(self):
-        self.alive = False
-        try:
-            if self.proc.stdin:
-                self.proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            self.proc.kill()
-        except Exception:
-            pass
-        log.info("🛑 터보 인코더 종료")
-
-    def probe_at(self, rx: float, ry: float):
-        """🎨 원본 프레임 (rx,ry) 비율 지점 8x8 평균 RGB — 폰 캔버스 중앙과 비교(줌 상태 무관)."""
-        buf = self.last_frame
-        if not buf:
-            return None
-        import numpy as _np
-        a = _np.frombuffer(buf, _np.uint8).reshape((self.h, self.w, 4))
-        x = max(0, min(self.w - 8, int(self.w * rx) - 4))
-        y = max(0, min(self.h - 8, int(self.h * ry) - 4))
-        blk = a[y:y + 8, x:x + 8]
-        return [round(float(blk[:, :, 2].mean()), 1),
-                round(float(blk[:, :, 1].mean()), 1),
-                round(float(blk[:, :, 0].mean()), 1)]
-
-    def get_au(self, timeout: float):
-        """(is_key, au_bytes) 또는 None. 소비 시각 갱신(자가종료 타이머 리셋)."""
-        self.last_get = time.time()
-        try:
-            return self.au_q.get(True, timeout)
-        except queue.Empty:
-            return None
-
-    # ── 캡처 스레드: fps 페이싱으로 풀프레임 → ffmpeg stdin ──
-    def _cap_loop(self):
-        import numpy as _np
-        last_bytes = None
-        nbytes = self.w * self.h * 4
-        dx_fail = 0            # dxcam 연속 실패 — 10회면 이 세션은 mss로 영구 전환 (검은화면 방지)
-        while self.alive:
-            t0 = time.time()
-            if time.time() - self.last_get > 5.0:      # 소비자 없음 → 자가 종료
-                log.info("💤 터보: 5초간 소비자 없음 → 자가 종료")
-                self.stop()
-                return
-            try:
-                cam, ox, oy = (None, 0, 0) if dx_fail >= 10 else get_dxcam_for(self.mon)
-                arr = None
-                if cam is not None:
-                    with _dx_grab_lock:                # 동시 grab = D3D INVALID_CALL 방지
-                        arr = cam.grab(region=(0, 0, self.w, self.h))   # 변화 없으면 None
-                    dx_fail = 0
-                else:
-                    raw = get_mss().grab({"left": self.mon["left"], "top": self.mon["top"],
-                                          "width": self.w, "height": self.h})
-                    arr = _np.frombuffer(raw.raw, _np.uint8).reshape((raw.height, raw.width, 4))
-                if arr is not None:
-                    if arr.shape[0] != self.h or arr.shape[1] != self.w:
-                        arr = _np.ascontiguousarray(arr[:self.h, :self.w])
-                    last_bytes = arr.tobytes()
-                if last_bytes is not None and len(last_bytes) == nbytes:
-                    self.last_frame = last_bytes        # 🎨 프로브 기준(원본색)
-                    self.proc.stdin.write(last_bytes)   # 정지화면도 재전송(비트 거의 0, fps 유지)
-            except (BrokenPipeError, OSError):
-                self.alive = False
-                return
-            except Exception as e:
-                dx_fail += 1
-                if dx_fail <= 3 or dx_fail == 10:
-                    log.warning(f"터보 캡처 오류({dx_fail}회): {e}")
-                if dx_fail == 10:
-                    log.warning("터보: dxcam 10연속 실패 → 이 세션 mss 폴백 (느리지만 화면 유지)")
-                time.sleep(0.1)
-            time.sleep(max(0.0, 1.0 / self.fps - (time.time() - t0)))
-
-    # ── 리더 스레드: stdout Annex-B → AUD 경계로 AU 분리 ──
-    def _read_loop(self):
-        buf = b""
-        while self.alive:
-            try:
-                chunk = self.proc.stdout.read(65536)
-            except Exception:
-                break
-            if not chunk:
-                log.warning(f"터보: ffmpeg stdout EOF (returncode={self.proc.poll()}) — _turbo_ffmpeg_err.log 확인")
-                break
-            buf += chunk
-            while True:
-                nals = _iter_nals(buf)
-                # AUD(9)가 각 AU의 머리 — 두 번째 AUD가 보이면 그 앞까지가 완성된 AU
-                aud_pos = [s for s, t in nals if t == 9]
-                if len(aud_pos) < 2:
-                    break
-                au = buf[aud_pos[0]:aud_pos[1]]
-                buf = buf[aud_pos[1]:]
-                is_key = any(t == 5 for s, t in _iter_nals(au))
-                if self._dropping and not is_key:
-                    continue                              # 드랍 중 — P프레임 하나만 빠져도 다음 키까지 다 깨지므로 통째 스킵
-                try:
-                    self.au_q.put_nowait((is_key, au))
-                    self._dropping = False
-                except queue.Full:
-                    self._dropping = True                 # 큐 포화(느린 소비자) → 비우고 다음 키부터 재개
-                    try:
-                        while True:
-                            self.au_q.get_nowait()
-                    except queue.Empty:
-                        pass
-                    if is_key:
-                        try:
-                            self.au_q.put_nowait((is_key, au))
-                            self._dropping = False
-                        except queue.Full:
-                            pass
-        self.alive = False
-
-
-_turbo_enc = None          # 전역 싱글턴 (단일 사용자)
-_turbo_gen = 0             # 인코더 세대 — 폰 재연결 시 turbo_start 재전송·IDR 재기동 판단
-_turbo_lock = threading.Lock()   # [2026-07-03 사고] 무락 레이스로 인코더 2개 동시 기동 → 동일 dxcam 동시 grab → D3D INVALID_CALL 폭풍
-
-
-def _turbo_stop():
-    global _turbo_enc
-    with _turbo_lock:
-        if _turbo_enc is not None:
-            try:
-                _turbo_enc.stop()
-            except Exception:
-                pass
-            _turbo_enc = None
-
-
-def _turbo_ensure(mon: dict, fps: int, kbps: int, force_new: bool = False):
-    """살아있고 설정 일치하면 재사용, 아니면 재기동. 반환 (인코더, 세대번호). 락 필수."""
-    global _turbo_enc, _turbo_gen
-    with _turbo_lock:
-        e = _turbo_enc
-        if force_new or e is None or not e.alive or not e.matches(mon, fps, kbps):
-            if e is not None:
-                try:
-                    e.stop()
-                except Exception:
-                    pass
-            _turbo_enc = e = _TurboEncoder(mon, fps, kbps)
-            _turbo_gen += 1
-        return e, _turbo_gen
 
 
 def cursor_ratio(monitor_id: int):
@@ -1553,20 +1241,6 @@ async def handle_message(msg: dict):
         STATE["q_quality"] = p["quality"]
         log.info(f"🎚 화질 모드: {mode} → {p}")
         return None
-    if t == "turbo_mode":          # 🚀 터보(H.264 NVENC) 온/오프 — 폰이 WebCodecs 가능할 때만 보냄
-        STATE["turbo"] = bool(msg.get("on", False))
-        STATE["turbo_fps"] = max(10, min(60, int(msg.get("fps", TURBO_FPS))))
-        STATE["turbo_kbps"] = max(2000, min(40000, int(msg.get("kbps", TURBO_KBPS))))
-        STATE["turbo_kbps_max"] = STATE["turbo_kbps"]   # 사용자 상한 — 적응조절이 이 위로는 안 올라감
-        if not STATE["turbo"]:
-            _turbo_stop()
-        log.info(f"🚀 터보 모드 {'ON' if STATE['turbo'] else 'OFF'} "
-                 f"({STATE['turbo_fps']}fps {STATE['turbo_kbps']}kbps)")
-        return {"type": "turbo_ok", "on": STATE["turbo"],
-                "fps": STATE["turbo_fps"], "kbps": STATE["turbo_kbps"]}
-    if t == "turbo_probe_result":  # 🎨 폰 디코드 색 회신 — 원본과의 차이를 로그로 (색사고 원인 실측)
-        log.info(f"🎨 색검증: PC원본 {msg.get('src')} → 폰디코드 {msg.get('got')} 최대Δ {msg.get('d')}")
-        return None
     if t == "monitor_reset":                    # [모니터 재셋팅] = 캡처 엔진 재초기화 (자폭 없음)
         global _mss_generation
         _mss_generation += 1                   # 모든 스레드가 다음 get_mss()에서 자동 재생성
@@ -2035,48 +1709,12 @@ _push = None                       # 현재 연결된 폰으로 dict 보내는 �
 _active_socks = []                 # 🔒 살아있는 폰 WS들 (단일 폰 정책 — 새 연결 시 옛 것 닫음, 중복 스트림=깜빡임/더빨리 방지)
 
 
-OTA_VERSION = 18  # [2026-07-03] v18 = 터보엔진(https 7443 우선 + http 폴백). aapt로 com.aris.tapdesk 검증 완료
+OTA_VERSION = 17  # 팝업버그 임시 동결 — TapDesk APK 재빌드 후 올바른 APK로 교체 필요
 _OTA_APK = ROOT / "app-debug.apk"
 
 @app.get("/ota/version")
 async def ota_version():
     return {"version": OTA_VERSION}
-
-
-@app.get("/turbo-set")
-async def turbo_set(token: str = "", on: int = 0, fps: int = 0, kbps: int = 0):
-    """🎛 터보 원격 제어(김대리 자동튜닝용) — 폰 손대지 않고 켜고끄기+설정. 색검증 프로브와 세트."""
-    if token != TOKEN:
-        return JSONResponse({"ok": False}, status_code=403)
-    STATE["turbo"] = bool(on)
-    if fps:
-        STATE["turbo_fps"] = max(10, min(60, fps))
-    if kbps:
-        STATE["turbo_kbps"] = max(2000, min(40000, kbps))
-        STATE["turbo_kbps_max"] = STATE["turbo_kbps"]
-    if not STATE["turbo"]:
-        _turbo_stop()
-    if _push is not None:
-        try:
-            await _push({"type": "turbo_ok", "on": STATE["turbo"], "persist": 1,
-                         "fps": STATE.get("turbo_fps", TURBO_FPS), "kbps": STATE.get("turbo_kbps", TURBO_KBPS)})
-        except Exception:
-            pass
-    log.info(f"🎛 터보 원격 {'ON' if STATE['turbo'] else 'OFF'} ({STATE.get('turbo_fps')}fps {STATE.get('turbo_kbps')}kbps)")
-    return {"ok": True, "turbo": STATE["turbo"], "fps": STATE.get("turbo_fps"), "kbps": STATE.get("turbo_kbps")}
-
-
-@app.get("/restart-self")
-async def restart_self(token: str = ""):
-    """♻ 자가 재시작 — 코드 수정 반영용. UAC 불필요(자기 자신 종료 → watchdog(7781)이 새 코드로 부활).
-    로컬/토큰 보유자만. [2026-07-03] 터보 반복 튜닝 때 관리자 재시작 반복 고통 해소."""
-    if token != TOKEN:
-        return JSONResponse({"ok": False}, status_code=403)
-    log.info("♻ 자가 재시작 요청 수신 — 0.5초 후 종료, watchdog이 부활")
-    _turbo_stop()
-    loop = asyncio.get_event_loop()
-    loop.call_later(0.5, lambda: os._exit(0))
-    return {"ok": True, "msg": "재시작 — 10초 내 부활"}
 
 @app.get("/ota/app.apk")
 async def ota_apk():
@@ -2524,14 +2162,8 @@ async def monitor_count_api():
         return JSONResponse({"count": 1})
 
 
-_watchers_started = False   # TLS(7443) 제2 uvicorn도 startup을 또 태우므로 1회만 기동
-
 @app.on_event("startup")
 async def _start_watcher():
-    global _watchers_started
-    if _watchers_started:
-        return
-    _watchers_started = True
     asyncio.create_task(phone_html_watcher())
     asyncio.create_task(drop_watcher())
     asyncio.create_task(clipboard_watcher())
@@ -2653,14 +2285,6 @@ async def ws_endpoint(ws: WebSocket):
         last_cur = None
         last_shape = None
         _err_streak = 0  # 연속 캡처 실패 카운터
-        _my_turbo_gen = -1   # 이 연결이 아는 인코더 세대 — 다르면 turbo_start 재전송+키프레임 대기
-        _turbo_wait_key = False
-        _turbo_last_au = 0.0   # 마지막 AU 수신 시각 — 3초 가뭄이면 자동 OFF(검은화면 방지)
-        # 📶 적응 비트레이트 (2026-07-05) — LTE 출렁임에 20M 고정이면 몇 초씩 밀려 "먹통+새로고침" 증상.
-        # 전송 0.3초+ 지연 5회 누적 → 한 단계 강하(20→12→8→5M), 90초 원활 → 한 단계 승급(사용자 상한까지)
-        _TB_LADDER = [20000, 12000, 8000, 5000]
-        _tb_slow = 0
-        _tb_last_step = time.time()
         while True:
             t0 = time.time()
             interval = 1.0 / STATE.get("q_fps", LTE_FPS if STATE.get("lte") else FPS)
@@ -2672,82 +2296,6 @@ async def ws_endpoint(ws: WebSocket):
                                      "ry": cur[1], "shape": shp})
                     last_cur = cur
                     last_shape = shp
-                # ── 🚀 터보(H.264) 경로 — JPEG 경로는 아래 그대로 동결 ──
-                if STATE.get("turbo"):
-                    # 🛡 영상 소유권 = 최신 연결 1개만. 유령(릴레이 옛페이지)이 AU 반씩 훔치면
-                    # 참조체인 깨져 화면 뭉개짐 (2026-07-03 실증: 인증 2건→기동 2번→프레임 분탈)
-                    if _active_socks and ws is not _active_socks[-1]:
-                        await asyncio.sleep(0.5)
-                        continue
-                    _m = _mon(STATE["monitor"])
-                    # 이 연결의 첫 진입이면 강제 재기동 → 첫 프레임 IDR 보장
-                    _enc, _gen = await asyncio.to_thread(
-                        _turbo_ensure, _m,
-                        STATE.get("turbo_fps", TURBO_FPS),
-                        STATE.get("turbo_kbps", TURBO_KBPS),
-                        _my_turbo_gen == -1)
-                    if _gen != _my_turbo_gen:
-                        _my_turbo_gen = _gen
-                        _turbo_wait_key = True
-                        _turbo_last_au = time.time()
-                        await send_json({"type": "turbo_start", "w": _enc.w, "h": _enc.h,
-                                         "fps": _enc.fps, "monitor": mss_to_win(STATE["monitor"])})
-                    au = await asyncio.to_thread(_enc.get_au, 0.5)
-                    if au is not None:
-                        _turbo_last_au = time.time()
-                        _is_key, _bytes = au
-                        if _turbo_wait_key and not _is_key:
-                            pass                        # 디코더가 못 여는 P프레임 스킵
-                        else:
-                            _turbo_wait_key = False
-                            _t_send = time.time()
-                            await send_frame(b"V264" + (b"\x01" if _is_key else b"\x00") + _bytes)
-                            # 📶 적응 비트레이트 — 전송 지연으로 회선 혼잡 감지
-                            _now = time.time()
-                            if _now - _t_send > 0.3:
-                                _tb_slow += 1
-                            elif _tb_slow > 0:
-                                _tb_slow -= 1
-                            _cur_k = STATE.get("turbo_kbps", TURBO_KBPS)
-                            if _tb_slow >= 5 and _now - _tb_last_step > 15:
-                                _low = next((k for k in _TB_LADDER if k < _cur_k), None)
-                                if _low:
-                                    STATE["turbo_kbps"] = _low
-                                    _tb_last_step = _now
-                                    _tb_slow = 0
-                                    log.info(f"📶 회선 혼잡 → 터보 {_cur_k//1000}M→{_low//1000}M 강하")
-                            elif (_tb_slow == 0 and _now - _tb_last_step > 90
-                                    and _cur_k < STATE.get("turbo_kbps_max", TURBO_KBPS)):
-                                _up = next((k for k in reversed(_TB_LADDER)
-                                            if k > _cur_k and k <= STATE.get("turbo_kbps_max", TURBO_KBPS)), None)
-                                if _up:
-                                    STATE["turbo_kbps"] = _up
-                                    _tb_last_step = _now
-                                    log.info(f"📶 회선 원활 → 터보 {_cur_k//1000}M→{_up//1000}M 승급")
-                            # 🎨 키프레임(1초 1회)마다 뷰 중심색 프로브 — 폰 캔버스 중앙과 자동 비교(줌 무관)
-                            if _is_key:
-                                _v = STATE.get("view", {})
-                                _rgb = _enc.probe_at(
-                                    (_v.get("rx1", 0.0) + _v.get("rx2", 1.0)) / 2,
-                                    (_v.get("ry1", 0.0) + _v.get("ry2", 1.0)) / 2)
-                                if _rgb:
-                                    await send_json({"type": "turbo_probe", "rgb": _rgb})
-                    elif time.time() - _turbo_last_au > (8.0 if _turbo_wait_key else 3.0):
-                        # 첫 AU는 NVENC 세션 예열(모니터 전환 직후 1~2초+) 감안 8초 유예, 이후엔 3초
-                        # 🛟 프레임 가뭄 3초 = 인코더/캡처 고장 → 자동 JPEG 복귀 (검은화면 원천봉쇄)
-                        log.warning("터보: 3초간 프레임 없음 → 자동 OFF, JPEG 복귀")
-                        STATE["turbo"] = False
-                        await asyncio.to_thread(_turbo_stop)
-                        _my_turbo_gen = -1
-                        try:
-                            await send_json({"type": "turbo_ok", "on": False})
-                            await send_json({"type": "toast", "text": "터보 일시 중단 → 일반 모드 자동 복귀"})
-                        except Exception:
-                            pass
-                    _err_streak = 0
-                    continue    # JPEG 경로·interval 스킵 (인코더가 fps 페이싱)
-                elif _my_turbo_gen != -1:
-                    _my_turbo_gen = -1                  # 터보 껐음 → JPEG 복귀, 인코더는 자가종료
                 jpeg, last_hash = await asyncio.to_thread(
                     grab_region, STATE["view"], last_hash)
                 if jpeg is not None:
@@ -2759,9 +2307,9 @@ async def ws_endpoint(ws: WebSocket):
                 _err_streak += 1
                 log.warning(f"캡처 오류: {e}")
                 if _err_streak % 10 == 0:  # 10회 연속 실패마다 mss 재초기화 + dxcam 재시도
-                    global _mss_generation, _dxcam_mod
+                    global _mss_generation, _dxcam_inst, _dxcam_mod
                     _mss_generation += 1
-                    _dxcam_reset()  # dxcam 전 인스턴스·맵 폐기 → 재시도 허용
+                    _dxcam_inst = None  # dxcam 재시도 허용
                     if _dxcam_mod is None:  # import 실패였으면 다시 시도
                         try:
                             import dxcam as _dxcam_mod
@@ -2927,36 +2475,17 @@ async def _relay_client():
             await asyncio.sleep(5)
 
 
-_relay_started = False      # TLS 제2 uvicorn의 중복 릴레이 접속 방지
-
 @app.on_event("startup")
 async def _start_relay():
-    global _relay_started
-    if _relay_started:
-        return
-    _relay_started = True
     asyncio.create_task(_relay_client())
 
 
-def _boot_trace(stage: str):
-    """🔍 기동 단계 발자국 — 어디서 멈추는지 즉시 파악 (2026-07-04 좀비 20마리 사건)."""
-    try:
-        with open(CANONICAL / "_boot_trace.log", "a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%H:%M:%S')}] pid={os.getpid()} {stage}\n")
-    except Exception:
-        pass
-
-
 def main():
-    _boot_trace("main 진입")
     import uvicorn
-    _boot_trace("uvicorn import OK")
     ensure_icon()
-    _boot_trace("ensure_icon OK")
     threading.Thread(target=audio_capture_thread, daemon=True).start()
     # threading.Thread(target=video_detect_thread, daemon=True).start()  # 영상 감지 비활성화 (vidCtrl 깜빡임 방지)
     ip = get_tailscale_ip()
-    _boot_trace(f"tailscale_ip OK ({ip})")
     print("=" * 54)
     print("  폴드5 PC 원격제어 — 경량 백엔드")
     print("=" * 54)
@@ -2979,43 +2508,9 @@ def main():
             if _retry == 0:
                 log.warning(f"⏳ 포트 {PORT} TIME_WAIT 대기 중...")
             time.sleep(2)
-    _boot_trace("7780 bind 사전확인 통과")
-    # [2026-07-03 터보] 7780 평문 + 7443 TLS(wss — 폰 WebCodecs는 보안컨텍스트 필수)를
-    # 같은 이벤트루프에서 동시 서빙 — 스레드 분리 시 /reload·클립보드 push가 루프 갈라져 죽음.
-    _kw = dict(log_level="warning", ws_ping_interval=60, ws_ping_timeout=120)
-    _crt, _key = CANONICAL / "_ts.crt", CANONICAL / "_ts.key"
-    _tls_ok = _crt.exists() and _key.exists()
-    if _tls_ok:
-        print(f"  🔐 wss TLS 리스너: https://aris-kim.taild92ffe.ts.net:{TLS_PORT}")
-    else:
-        print("  ⚠ _ts.crt/_ts.key 없음 → TLS(7443) 생략, 평문 7780만")
-
-    async def _serve_tls_forever():
-        # [2026-07-04] 7443이 바인드 실패·소켓사고로 조용히 죽으면 v18 앱이 못 들어옴(실증)
-        # → 죽어도 30초마다 부활하는 불사조 루프. 7780은 건드리지 않음.
-        while True:
-            try:
-                s2 = uvicorn.Server(uvicorn.Config(
-                    app, host="0.0.0.0", port=TLS_PORT,
-                    ssl_certfile=str(_crt), ssl_keyfile=str(_key), **_kw))
-                log.info(f"🔐 TLS({TLS_PORT}) 리스너 기동")
-                await s2.serve()
-                log.warning(f"TLS({TLS_PORT}) 서버 내려감 → 30초 후 재기동")
-            except Exception as e:
-                log.warning(f"TLS({TLS_PORT}) 오류: {e} → 30초 후 재기동")
-            await asyncio.sleep(30)
-
-    async def _serve_all():
-        _boot_trace("serve_all 진입 — 7780 리스너 기동")
-        tasks = [uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=PORT, **_kw)).serve()]
-        if _tls_ok:
-            tasks.append(_serve_tls_forever())
-        await asyncio.gather(*tasks)
-
-    _boot_trace("asyncio.run 직전")
-    asyncio.run(_serve_all())
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning",
+                ws_ping_interval=60, ws_ping_timeout=120)
 
 
 if __name__ == "__main__":
-    _boot_trace("모듈 임포트 전체 완료")
     main()
