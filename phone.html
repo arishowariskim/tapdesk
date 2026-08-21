@@ -473,6 +473,7 @@ html, body {
 }
 #lteBtn.speed { color:#fff; background:#e83a3a; border-color:#e83a3a; box-shadow:0 0 12px rgba(232,58,58,.55); }
 #lteBtn.hd    { color:#fff; background:#2a7adb; border-color:#2a7adb; box-shadow:0 0 12px rgba(42,122,219,.55); }
+#lteBtn.lite  { color:#fff; background:#2e9e5b; border-color:#2e9e5b; box-shadow:0 0 12px rgba(46,158,91,.55); }
 /* 모니터 선택 바 — 상단 중앙, 모니터 2개 이상일 때만 표시 (썸네일 미리보기) */
 /* 모니터 썸네일 — 각각 독립 floating 버튼 (자유 배치) */
 .monFloat {
@@ -926,7 +927,7 @@ html, body {
   </svg>
 </div>
 
-<div id="lteBtn"><span id="dot"></span><span id="lteLabel">⚡ AUTO</span></div>
+<div id="lteBtn"><span id="dot"></span><span id="lteLabel">⚡ AUTO</span><span id="pingVal" style="margin-left:5px;font-size:10.5px;font-weight:800;letter-spacing:0;"></span></div>
 <!-- 모니터 썸네일은 JS가 개별 floating 버튼으로 body에 직접 생성 -->
 
 <div id="zoomPanel">
@@ -1556,6 +1557,7 @@ function flushFrame() {
   }
   if (isVF) screenCtx.drawImage(bmp, sx, sy, sw, sh, 0, 0, dw, dh);
   else screenCtx.drawImage(bmp, 0, 0);   // JPEG 경로 — 기존 그대로 (이전 픽셀 위 덮어쓰기 = blank 없음)
+  window._drawn = (window._drawn || 0) + 1;   // 📊 검은화면 진단 계측
   bmp.close();                           // ImageBitmap·VideoFrame 메모리 즉시 해제(필수)
   if (pinchPreview && !pinchActive) {    // [쇼바] 핀치 끝 + 새 crop 도착 → CSS 부드럽게 해제
     screenImg.style.transition = "transform .12s ease-out";
@@ -2317,10 +2319,12 @@ function onMessage(ev) {
       return;
     }
     if (h[0] === 86 && h[1] === 50 && h[2] === 54) {  // "V26"("V264") = 🚀 터보 H.264 프레임 [4B매직+1B키+AnnexB]
+      window._rxVid = (window._rxVid || 0) + 1;   // 📊 검은화면 진단 계측 (2026-07-13)
       const u8 = new Uint8Array(buf);
       if (u8.length > 5) turboFeed(u8.subarray(5), u8[4] === 1);
       return;
     }
+    window._rxJpeg = (window._rxJpeg || 0) + 1;   // 📊 검은화면 진단 계측 — JPEG 바이너리 도착 수
     // 🖼 canvas 렌더: createImageBitmap(논블로킹 디코드) → rAF에서 drawImage → close. img.src 번쩍 제거.
     const seq = ++frameSeq;
     createImageBitmap(new Blob([buf])).then((bmp) => {
@@ -2334,7 +2338,7 @@ function onMessage(ev) {
     return;
   }
   let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-  if (m.type === "auth_ok" || m.type === "relay_ok") { setStatus(true); sendView(true); send({ type:"lte_mode", on:netLow() }); if (sndOn) send({ type:"audio_mode", on:true }); if (clipWatch) send({ type:"clip_watch", on:true }); connectAudio(); sendTurboPref();
+  if (m.type === "auth_ok" || m.type === "relay_ok") { setStatus(true); sendView(true); send({ type:"lte_mode", on:netLow() }); try { lastSentMode = null; pushNet(); } catch (e) {} if (sndOn) send({ type:"audio_mode", on:true }); if (clipWatch) send({ type:"clip_watch", on:true }); connectAudio(); sendTurboPref();
     try { if (localStorage.getItem("justReloaded")) { localStorage.removeItem("justReloaded"); setTimeout(() => toast("새로고침", 4000), 700); } } catch(e) {}
     try { const _dbg = localStorage.getItem("_gsDbg"); if (_dbg) { localStorage.removeItem("_gsDbg"); const d = JSON.parse(_dbg); const _sm = scrMode(); const _zo = JSON.parse(localStorage.getItem("zOrderAll") || "{}"); const _n = _zo[_sm] !== undefined ? _zo[_sm].length : "?"; setTimeout(() => toast("📊 " + _sm + "슬롯=" + _n + " spread=" + d.n + "키 Lo저장=" + d.lo, 8000), 1400); } } catch(e) {} }   // 새로고침 직후 알림 (연결 완료 후라 안 덮임)
   else if (m.type === "restore_settings") {
@@ -2352,6 +2356,24 @@ function onMessage(ev) {
   }
   else if (m.type === "auth_fail") { setStatus(false); toast("인증 실패"); }
   else if (m.type === "reload") { try { localStorage.setItem("justReloaded","1"); } catch(e) {} doReloadAnim(() => { location.href = location.pathname + "?_=" + Date.now(); }); }   // 핫리로드 — 캐시 버스팅(타임스탬프 쿼리)으로 WebView 캐시 우회
+  else if (m.type === "pong") { if (typeof onPong === "function") onPong(); }   // 📡 핑 응답 — 실시간 핑 표시 (2026-08-07 대표님 발주)
+  else if (m.type === "pc_block") {   // 🛡 PC쪽 차단(UAC 보안데스크톱) 감지 — 서버 재시작 후부터 옴 (2026-08-07 대표님 발주)
+    if (typeof netAlertShow === "function") {
+      clearInterval(window._naUacCnt);
+      if (m.on) {
+        // ★자동해제 카운트다운 — UAC는 원격에서 못 누르는 게 보안 설계라 버튼 해결이 불가능. 대신
+        //   "언제 풀리는지"를 초 단위로 세준다. ★전광판 호환: 숫자(<b id=naCnt>)만 갈아끼워 흐름이 안 끊긴다.
+        let _left = 120;
+        netAlertShow("uac", "🛡 PC 관리자 승인창",
+          'PC에 관리자 승인창(UAC)이 떠서 원격 입력·화면이 차단 중입니다. 무응답이면 약 <b class="naCnt">120</b>초 후 자동 해제 — PC 앞이라면 승인창을 직접 닫으세요.');
+        window._naUacCnt = setInterval(() => {
+          _left = Math.max(0, _left - 1);
+          if (netAlertCause === "uac") document.querySelectorAll(".naCnt").forEach((c) => { c.textContent = String(_left); });   // ★전광판 2벌 모두 갱신
+          if (!_left) clearInterval(window._naUacCnt);
+        }, 1000);
+      } else netAlertHide("uac");
+    }
+  }
   else if (m.type === "rec_stop") { if (m.who !== "phone" && recording) { stopRec(); toast("바탕 마이크로 전환"); } }   // 바탕 버블이 녹음 켜면 폰 녹음 자동 끔 (상호배타)
   else if (m.type === "clip_add") { addClip(m.text, m.label); }   // 🗒 복사 버튼/드롭박스 → 자체 보관함 적재(label=파일명)
   else if (m.type === "toast") { toast(m.text); }                 // 서버 알림(긁어복사 입고 등)
@@ -2457,6 +2479,12 @@ setInterval(() => {
     try { ws.close(); } catch (e) {}   // onclose → 0.5초 후 자동 재접속
   }
 }, 3000);
+// 📊 검은화면 진단 계측 (2026-07-13) — 10초마다 수신·드로우 수를 서버 로그로 자가보고
+setInterval(() => {
+  try { send({ type: "frame_report", jpeg: window._rxJpeg || 0, vid: window._rxVid || 0,
+               drawn: window._drawn || 0, sched: drawScheduled, pend: !!pendingBmp,
+               cv: canvasNW + "x" + canvasNH }); } catch (e) {}
+}, 10000);
 
 function connectAudio() {
   if (wsAud && wsAud.readyState <= 1) return;   // 이미 연결 중·완료
@@ -2607,6 +2635,10 @@ function sendView(force) {
 
 // ───── 화면 영역 터치 ─────
 let mode = null, t1Start = 0, t1Moved = false, t1x = 0, t1y = 0, two = null;
+// ★한손가락 스크롤(대표님 지시 2026-08-13 밤 "톡 한 상태에서 위로 올리면 스크롤") — 짚은 뒤 첫 움직임이
+//   또렷하게 수직이면 스크롤로, 아니면 기존처럼 커서이동으로 확정한다(터치당 1번만 판정, 이후 고정).
+//   t1Dir: null=아직 미확정 / "move"=커서이동 확정 / "scroll"=스크롤 확정.
+let t1Dir = null, t1LastY = 0;
 let panX = 0, panY = 0;   // [줌아웃] z<1일 때 canvas CSS 이동량(px) — 두 손가락 드래그로 전방향 pan
 let mouseMode = localStorage.getItem("mouseMode") === "1";   // 마지막 모드 복원 (리로드 후 유지)
 let lpTimer = null, holding = false, tpActive = false;
@@ -2620,6 +2652,7 @@ screenImg.addEventListener("touchstart", (e) => {
     mode = "1";
     const t = e.touches[0];
     t1Start = Date.now(); t1Moved = false; t1x = t.clientX; t1y = t.clientY;
+    t1Dir = null; t1LastY = t.clientY;   // ★한손가락 스크롤 — 매 터치마다 미확정으로 리셋
     if (mouseMode) {                       // 트랙패드 — 커서 안 옮김, 손가락·커서 기준점만 기록
       tpActive = true;                     // 끄는 동안 서버 커서신호 무시 (튕김 방지)
       lastFx = t.clientX; lastFy = t.clientY;
@@ -2653,11 +2686,30 @@ screenImg.addEventListener("touchmove", (e) => {
   e.preventDefault();
   if (mode === "1" && e.touches.length === 1) {
     const t = e.touches[0];
-    if (Math.abs(t.clientX-t1x) > 15 || Math.abs(t.clientY-t1y) > 15) {
+    const _dx0 = t.clientX-t1x, _dy0 = t.clientY-t1y;
+    if (Math.abs(_dx0) > 15 || Math.abs(_dy0) > 15) {
       t1Moved = true;
       if (mouseMode && !holding) clearTimeout(lpTimer);   // 움직이면 롱프레스 취소
+      // ★한손가락 스크롤 방향판정(대표님 지시 2026-08-13 밤) — 15px 넘어선 이 순간 딱 1번만 판정.
+      //   이미 롱프레스로 잡은(holding) 상태면 그 기존 제스처를 우선한다(새 기능이 가로채지 않음).
+      //   ★톡(탭클릭) 모드 전용으로 격리(대표님 지시 2026-08-17) — 패드(트랙패드=mouseMode) 드래그가
+      //   스크롤로 오인식되던 버그 수정. mouseMode면 t1Dir가 영원히 null로 남아 아래 else-if(mouseMode)
+      //   분기가 항상 타므로 패드 동작은 스크롤 기능 도입 이전과 100% 동일하게 복원된다.
+      if (t1Dir === null && !holding && !mouseMode) {
+        t1Dir = (Math.abs(_dy0) > Math.abs(_dx0) * 1.8) ? "scroll" : "move";
+      }
     }
-    if (mouseMode) {                        // 트랙패드 — 손가락 민 만큼만 커서 상대 이동
+    if (t1Dir === "scroll") {               // 스크롤 확정 — 커서는 그 자리 고정, 휠만 보냄
+      // ★방향 반전(대표님 실사고 2026-08-13 밤 "밑으로 내리면 화면이 거꾸로 위로 올라간다, 반대로 해줘"):
+      //   화면 직접 터치는 손가락을 따라가는 자연스크롤(아래로 밀면 아래쪽 내용)을 기대한다 — 기존
+      //   bindZone(레일·존 위젯)의 부호를 그대로 썼더니 반대로 느껴짐. 이 제스처만 부호 반전, 다른
+      //   위젯(레일·패드·존)은 이미 대표님이 써오던 방향이라 그대로 둔다(회귀 방지).
+      const diff = t1LastY - t.clientY;
+      if (Math.abs(diff) > 3) {
+        send({ type:"wheel", dy: diff>0?-1:1, speed: Math.min(20, Math.max(1, Math.abs(diff)/5*scrollSpeed/4)) });
+        t1LastY = t.clientY;
+      }
+    } else if (mouseMode) {                 // 트랙패드 — 손가락 민 만큼만 커서 상대 이동
       const v = viewRect(), L = screenLayout();
       curPos.rx = clamp(curPos.rx + (t.clientX-lastFx)/L.w*v.rw, 0, 1);
       curPos.ry = clamp(curPos.ry + (t.clientY-lastFy)/L.h*v.rh, 0, 1);
@@ -2691,6 +2743,7 @@ screenImg.addEventListener("touchmove", (e) => {
         // ── 빠른줌: AM 6:11 그대로, 방향 무관 CSS 즉시 ──
         const sc = dist / two.dist;
         const tx = mx - two.smx, ty = my - two.smy;
+        two.lmx = mx; two.lmy = my;   // [pan커밋] 마지막 두손가락 중점 — 손 뗄 때 이동 확정용
         screenImg.style.transition = "none";
         screenImg.style.transformOrigin = (two.smx - L.left) + "px " + (two.smy - L.top) + "px";
         screenImg.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + sc + ")";
@@ -2753,6 +2806,16 @@ screenImg.addEventListener("touchend", (e) => {
         pinchActive = false; pinchPreview = false;
         screenImg.style.transition = "";
         screenImg.style.transform = "";
+      }
+      // [빠른줌 pan 커밋 2026-07-05] 빠른줌은 이동을 view에 저장 안 해 손 떼면 스냅백
+      // (제스처 감찰 실측: pan 후 cx 0.5→0.5, 반영 1137ms). 최적줌과 같은 앵커 공식으로 확정.
+      if (zoomMode === "fast" && two && two.moved && view.z >= 1
+          && two.anchor && two.lmx !== undefined) {
+        const L2 = screenLayout();
+        const rw2 = Math.min(1, 1 / view.z), rh2 = Math.min(1, monAspect() / (phoneAspect() * view.z));
+        const fx2 = clamp((two.lmx - L2.left) / L2.w, 0, 1), fy2 = clamp((two.lmy - L2.top) / L2.h, 0, 1);
+        view.cx = two.anchor.rx - rw2 * (fx2 - 0.5);
+        view.cy = two.anchor.ry - rh2 * (fy2 - 0.5);
       }
       sendView(true);
       // 핀치 줌도 모니터별로 저장 — 안 하면 모니터 전환 후 옛 줌으로 되돌아감 (버그 수정)
@@ -4519,18 +4582,40 @@ $("settings").addEventListener("click", (e) => {
 //  hd   = 항상 최고 화질
 //  auto = 화면 정지 시 최고화질 / 조작 시 자동 저화질
 let netMode = localStorage.getItem("netMode") || "lte";
-const NET_CYCLE = ["speed", "lte", "hd", "auto"];
+const NET_CYCLE = ["speed", "lte", "hd", "auto", "lite"];   // 🔋 5번째 — ECO(가벼운) 모드(페이블 설계 2026-08-13 밤)
 let autoLow = false, autoTimer = null, lastSentMode = null;
+// ★실사고 수리(대표님 실측 2026-08-13 밤, USB 케이블 연결 후 폰 직접조작 중 logcat으로 발견) — netLow()가
+//   auth_ok/relay_ok 핸들러(2341행대)에서 호출되는데 정의 자체가 파일 어디에도 없어 매 연결 성공마다
+//   ReferenceError로 그 시점 이후 코드(audio_mode·clip_watch·connectAudio·sendTurboPref)가 조용히 다
+//   안 돌고 있었다 — 언제부터인지는 미확인이나, pushNet()의 기존 "저대역폭 판정" 공식과 동일하게 복원.
+function netLow() {
+  const mode = netMode === "auto" ? (autoLow ? "auto_lo" : "auto_hi") : netMode;
+  return mode === "speed" || mode === "lte" || mode === "auto_lo";
+}
+let _ecoOverlay = null;   // 🔋 ECO 검은 덮개 엘리먼트 — applyNetBtn()이 즉시 동기호출되므로 사용 전에 선언해야 함
+  // ★실사고 2026-08-13 밤(대표님 실측): 이 선언이 원래 클릭핸들러 뒤(더 아래)에 있어서 applyNetBtn()의
+  //   최초 동기호출(바로 아래)이 initialization 전에 _ecoOverlay를 참조 → TDZ ReferenceError로
+  //   스크립트 전체가 그 지점에서 죽어 WebSocket 연결 자체가 안 열렸다(logcat으로 직접 확인).
 function applyNetBtn() {
   const b = $("lteBtn");
   const lab = $("lteLabel");
-  b.classList.remove("on", "auto", "speed", "hd");
+  b.classList.remove("on", "auto", "speed", "hd", "lite");
   if (netMode === "speed") { b.classList.add("speed"); lab.textContent = "🚀 SPEED"; }
   if (netMode === "lte")   { b.classList.add("on");    lab.textContent = "📶 LTE"; }
   if (netMode === "hd")    { b.classList.add("hd");    lab.textContent = "🎬 HD"; }
   if (netMode === "auto")  { b.classList.add("auto");  lab.textContent = "⚡ AUTO"; }
+  if (netMode === "lite")  { b.classList.add("lite");  lab.textContent = "🔋 ECO"; }
+  applyEcoOverlay();
 }
 function pushNet() {
+  // 🔋 ECO — 화질모드(quality_mode)는 안 건드린다(마지막 값 그대로 기억) — lite 전용 신호만 보낸다.
+  if (netMode === "lite") {
+    if (lastSentMode === "lite") return;
+    lastSentMode = "lite";
+    send({ type:"lite", on: true });
+    return;
+  }
+  if (lastSentMode === "lite") send({ type:"lite", on: false });   // ECO에서 다른 모드로 나갈 때 해제 통지
   const mode = netMode === "auto" ? (autoLow ? "auto_lo" : "auto_hi") : netMode;
   if (mode === lastSentMode) return;
   lastSentMode = mode;
@@ -4549,8 +4634,29 @@ $("lteBtn").addEventListener("click", () => {
   toast(netMode === "speed" ? "🚀 SPEED — 최고속"
       : netMode === "lte"   ? "📶 LTE — 균형"
       : netMode === "hd"    ? "🎬 HD — 고화질"
+      : netMode === "lite"  ? "🔋 ECO — 화면끄고 배터리 절약"
       :                       "⚡ AUTO");
 });
+// 🔋 ECO 검은 덮개(페이블 설계 §3-4) — AMOLED 픽셀 꺼짐 보너스. screenImg 영역만 덮는다(도크·버튼 무접촉).
+// 톡 → lite_snap 1장 요청 → 도착한 정지화면은 기존 프레임 수신 경로 그대로 screenImg에 그려짐(무접촉).
+// (★_ecoOverlay 선언은 위 4584행으로 이동 — TDZ 사고 수리, 여기 중복 선언 제거)
+function applyEcoOverlay() {
+  if (netMode === "lite") {
+    if (!_ecoOverlay) {
+      _ecoOverlay = document.createElement("div");
+      _ecoOverlay.id = "ecoOverlay";
+      _ecoOverlay.style.cssText = "position:fixed;inset:0;background:#000;z-index:5;"
+        + "display:flex;align-items:center;justify-content:center;color:#5cd68a;"
+        + "font-size:13px;font-weight:700;letter-spacing:.3px;";
+      _ecoOverlay.textContent = "🔋 ECO · 톡 = 화면 한 장 보기";
+      _ecoOverlay.addEventListener("click", () => { send({ type:"lite_snap" }); toast("📷 한 장 요청"); });
+      document.body.appendChild(_ecoOverlay);
+    }
+    _ecoOverlay.style.display = "flex";
+  } else if (_ecoOverlay) {
+    _ecoOverlay.style.display = "none";
+  }
+}
 // AUTO 모드 — 화면 드래그 중엔 저화질 유지, 손 떼고 0.8초 안정되면 고화질
 //  · 손가락이 화면에 닿아있는 동안 = 조작 중 → 저화질 계속 유지 (깜빡임 없음)
 //  · 실제 드래그(touchmove)만 감지 — 단순 탭/클릭은 화질 안 건드림
@@ -4564,16 +4670,250 @@ function autoMove() {                            // 드래그 감지 → 저화�
   if (netMode !== "auto" || !autoTouching) return;
   if (!autoLow) { autoLow = true; pushNet(); }
 }
-function autoUp() {                              // 손 뗌 → 즉시 고화질 복귀
+function autoUp() {                              // 손 뗌 → 고화질 복귀 (★회선 나쁘면 복귀 보류 — 2026-08-07 대표님 발주)
   if (netMode !== "auto") return;
   autoTouching = false;
   clearTimeout(autoTimer);
-  autoTimer = setTimeout(() => { autoLow = false; pushNet(); }, 80);
+  // ★핑 게이트: 저화질로 내려간 상태에서 회선이 나쁘면(핑 600ms+ 2연속) 고화질로 도로 안 올라간다.
+  //   회선이 회복(핑 300ms 이하 3연속)되면 그때 자동 복귀 — 영원히 잠그면 회복 후에도 저화질에 갇히므로.
+  //   회선 정상일 땐 기존과 100% 동일(80ms 복귀 = 회귀 0). HD/LTE/SPEED 고정 모드는 무접촉.
+  autoTimer = setTimeout(function _tryHi() {
+    if (pingBadStreak >= 2) { autoTimer = setTimeout(_tryHi, 2000); return; }
+    autoLow = false; pushNet();
+  }, 80);
 }
 screenImg.addEventListener("touchstart",  autoDown, { capture:true, passive:true });
 screenImg.addEventListener("touchmove",   autoMove, { capture:true, passive:true });
 screenImg.addEventListener("touchend",    autoUp,   { capture:true, passive:true });
 screenImg.addEventListener("touchcancel", autoUp,   { capture:true, passive:true });
+
+// ───── 📡 실시간 핑 표시 (2026-08-07 대표님 발주 "핑 속도를 알아야 조치를 취한다") ─────
+//  · 2초마다 서버에 {type:"ping"} → 서버의 기존 pong 응답(server.py 1867행, 서버 무수정)까지 왕복시간 = 핑
+//  · 우상단 화질 버튼(lteBtn) 안에 수치만 딱 표시 — 4모드(AUTO/SPEED/LTE/HD) 어디서든 항상 갱신
+//  · 색 = 기준값 안내: 초록 ≤150ms(정상, 평소 40~60) / 노랑 ≤500ms(주의) / 빨강 >500ms(불량) / "끊김"=응답 없음
+//  · pingBadStreak/pingGoodStreak → 위 autoUp의 AUTO 고화질복귀 게이트가 참조
+let pingSentAt = 0, pingRtt = -1, pingBadStreak = 0, pingGoodStreak = 0;
+// ── 🚨 사용불가 원인 중앙 알림 (2026-08-07 대표님 발주 "느려지는 이유를 알아야 바로 대처") ──
+//  원인 2종을 구분해 화면 정중앙에 크게: ①회선 탓(핑 엔진이 폰 단독 감지) ②PC 탓(서버가 UAC 보안데스크톱
+//  감지 → pc_block 신호, ★서버 재시작 후부터). pointer-events:none — 알림이 터치를 가로막지 않는다.
+let netAlertCause = "";
+// ★원형 축소 배너 (대표님 지시 2026-08-13 "우상단 LTE·HD 배지랑 겹치면 안 된다 — 처음엔 원형으로,
+//   누르면 펼쳐지게"): 기존 97vw 전광판이 top:4px 그대로라 우상단 #lteBtn(z13)·좌상단 #zoomPanel(z13)과
+//   같은 줄을 지나가며 부딪혔다. 처음 뜰 때는 화면 정중앙 상단에 작은 원(두 코너 배지 사이 빈 자리)만
+//   보이고, 탭하면 기존 전광판이 그대로 펼쳐진다 — 전광판 자체 디자인·드래그·버튼은 완전 무접촉.
+let netAlertCollapsed = true;   // ★새 알림이 뜨는 순간(hidden→visible)에만 true로 리셋 — 이미 펼쳐본 알림은 핑 갱신마다 다시 접히면 안 됨
+const naCircleEl = (() => {
+  const c = document.createElement("div");
+  c.style.cssText = "position:fixed;top:7px;left:50%;transform:translateX(-50%);z-index:12;display:none;"
+    + "width:15px;height:15px;border-radius:50%;pointer-events:auto;touch-action:none;"
+    + "background:radial-gradient(circle at 35% 35%,#ffe9a8,#d4af37 60%,#7a5c14);"
+    + "border:1.5px solid #d4af37;animation:naGoldPulse 1.6s ease-in-out infinite;";
+  c.addEventListener("touchend", (e) => { e.preventDefault(); e.stopPropagation(); netAlertSetCollapsed(false); }, { passive: false });
+  c.addEventListener("click", (e) => { e.stopPropagation(); netAlertSetCollapsed(false); });
+  document.body.appendChild(c);
+  return c;
+})();
+/** collapsed=true → 원형만, false → 기존 전광판만. 알림 자체가 없으면(netAlertCause=="") 둘 다 숨김. */
+function netAlertSetCollapsed(v) {
+  netAlertCollapsed = v;
+  if (!netAlertCause) return;   // 활성 알림 없음 — 표시할 것 없음(netAlertHide가 이미 둘 다 감춤)
+  naCircleEl.style.display = v ? "block" : "none";
+  netAlertEl.style.display = v ? "none" : "block";
+}
+const netAlertEl = (() => {
+  // ★금색 고급 스타일 (대표님 지시 2026-08-07 "빨간색 촌스러워 — 금색 + LED") — 멘트슬롯머신과 같은
+  //   "클래식 골드" 톤: 검정 벨벳 바탕 + 금테 + 잭팟 램프 8개 순차 점멸 + 금빛 숨쉬는 광채.
+  const st = document.createElement("style");
+  st.textContent = "@keyframes naLampBlink { 0%,100% { opacity:1; } 50% { opacity:.22; } }"
+    + "@keyframes naGoldPulse { 0%,100% { box-shadow:0 0 16px rgba(227,184,120,.5),0 8px 44px rgba(0,0,0,.7); }"
+    + " 50% { box-shadow:0 0 34px rgba(227,184,120,.95),0 8px 44px rgba(0,0,0,.7); } }"
+    // ★전광판 스크롤(대표님 지시 2026-08-07 "스크롤이 왼쪽으로 보이게") — 말줄임 대신 글자가 흐른다.
+    //   ★연속류(2차 지시 "사라졌다 다시 나오지 말고 광고처럼 계속"): 같은 글 2벌을 이어붙이고 -50%씩
+    //   무한 이동 = 첫 벌이 빠져나가는 동안 둘째 벌이 바로 따라붙어 빈 공백 0.
+    + "@keyframes naMarquee { from { transform:translateX(0); } to { transform:translateX(-50%); } }";
+  document.head.appendChild(st);
+  // ★상단 한 줄 배너로 이전 (대표님 지시 2026-08-07 "가운데 있으니 화면이 안 보여 — 맨 위 한 줄로"):
+  //   중앙 대형 카드 폐기, 최상단에 가로 1줄(램프·제목·설명·버튼 인라인). 화면 내용을 안 가린다.
+  const d = document.createElement("div");
+  // ★z=12 (대표님 지시 2026-08-07 "LTE·HD 토글은 무조건 보여야") — 화질토글(z13)·도크(z20)·스크롤위젯(z28) 등
+  //   모든 조작 UI보다 아래층. 전광판이 꽉 차게 떠도 버튼들은 항상 그 위에 보이고 눌린다.
+  // ★top:4px→42px(대표님 실사고 2026-08-13 "펼치면 좌우상단 버튼이 가려지거나 덮인다") — 97vw 폭이라
+  //   좌상단 #zoomPanel·우상단 #lteBtn(둘 다 top:7px, z13)과 같은 줄을 그대로 지나가 여전히 부딪혔다.
+  //   폭을 줄이는 대신(코너 버튼 실폭 미상, 화면크기별로 계속 어긋날 위험) 그 줄 자체를 통째로 비켜
+  //   아래(그 버튼들 높이 밑)로 내린다 — 화면크기 무관하게 항상 안전.
+  d.style.cssText = "position:fixed;top:42px;left:50%;transform:translateX(-50%);z-index:12;display:none;"
+    + "background:linear-gradient(160deg,#1a1408,#0d0a06 60%,#141008);color:#e8dcc0;padding:6px 14px;border-radius:14px;"
+    // ★드래그 이동식(대표님 지시 2026-08-07 "드래그 되게 — 말줄임 때문에 내용을 모르겠다"): 폭 제한으로
+    //   글자를 자르는 대신, 배너를 손으로 끌어 아무 데나 두게 한다(위치 localStorage 영속 = 영속 철칙).
+    //   pointer-events:auto — 드래그를 받으려면 필수(투과 포기, 대신 옮기면 됨).
+    // ★가로 꽉 채움(대표님 지시 2026-08-07 "여백 있는데 꽉 차게") — 배너가 화면폭 97vw 고정, 글자 창은 flex:1로 남는 공간 전부 사용
+    // ★폭 vw→calc(100vw - 고정px)로 교체(대표님 실사고 2026-08-13 "가로모드 세로모드 다 달라야 되는 거
+    //   알지?"): 97vw든 74vw든 "퍼센트"는 코너 배지(#zoomPanel·#lteBtn, 자체 크기는 화면방향과 무관하게
+    //   고정)와의 여백이 화면방향마다 달라진다 — 가로모드(화면 넓음)에서 74vw는 절대폭이 커져 코너
+    //   배지와의 여백이 오히려 줄거나 겹칠 수 있다. "화면폭 - 고정 여백"으로 바꾸면 양쪽 여백(130px씩,
+    //   코너 배지 실측 최대폭보다 넉넉)이 방향 무관 항상 동일하게 보장된다 — 세로에선 배너가 상대적으로
+    //   좁게, 가로에선 상대적으로 넓게 자동으로 달라지는 게 바로 이 계산의 자연스러운 결과.
+    + "border:2px solid #d4af37;animation:naGoldPulse 1.6s ease-in-out infinite;pointer-events:auto;touch-action:none;width:calc(100vw - 260px);box-sizing:border-box;";
+  // ★낡은 드래그위치 1회 마이그레이션(대표님 실사고 2026-08-13 "중앙정렬해야 될 거 아니야, 시계 때문에
+  //   가려졌잖아") — 오늘 원형↔펼침·위치(top:4→42px)·폭(97vw→calc)을 통째로 다시 설계했는데, 예전에
+  //   손으로 끌어놨던 naAlertPos(옛 좌상단 근처)가 그대로 남아 새 중앙정렬 기본값을 덮어써 시계 위젯과
+  //   겹쳤다. 이 재설계 배포 1회만 지운다 — 그 뒤 대표님이 다시 끌면 정상적으로 새로 저장·복원된다.
+  try {
+    if (!localStorage.getItem("naAlertPos_migrated_v2")) {
+      localStorage.removeItem("naAlertPos");
+      localStorage.setItem("naAlertPos_migrated_v2", "1");
+    }
+  } catch (e) {}
+  try {
+    const _p = JSON.parse(localStorage.getItem("naAlertPos") || "null");
+    if (_p && typeof _p.x === "number") { d.style.left = _p.x + "px"; d.style.top = _p.y + "px"; d.style.transform = "none"; }
+  } catch (e) {}
+  let _naDrag = null;
+  d.addEventListener("touchstart", (e) => {
+    if (e.target.tagName === "BUTTON") return;   // 해결 버튼은 그대로 눌리게
+    const t = e.touches[0]; const r = d.getBoundingClientRect();
+    _naDrag = { dx: t.clientX - r.left, dy: t.clientY - r.top, sx: t.clientX, sy: t.clientY, moved: false };
+  }, { passive: true });
+  d.addEventListener("touchmove", (e) => {
+    if (!_naDrag) return;
+    const t = e.touches[0];
+    if (!_naDrag.moved && Math.hypot(t.clientX - _naDrag.sx, t.clientY - _naDrag.sy) < 8) return;
+    _naDrag.moved = true; e.preventDefault();
+    const x = clamp(t.clientX - _naDrag.dx, 0, innerWidth - d.offsetWidth);
+    const y = clamp(t.clientY - _naDrag.dy, 0, innerHeight - d.offsetHeight);
+    d.style.left = x + "px"; d.style.top = y + "px"; d.style.transform = "none";
+  }, { passive: false });
+  d.addEventListener("touchend", (e) => {
+    if (_naDrag && _naDrag.moved) {
+      try { localStorage.setItem("naAlertPos", JSON.stringify({ x: parseFloat(d.style.left) || 0, y: parseFloat(d.style.top) || 0 })); } catch (e2) {}
+    } else if (e.target.tagName !== "BUTTON") {
+      // ★탭(드래그 아님)이면 다시 원형으로 접는다(대표님 지시 2026-08-13) — 해결 버튼 위 탭은 제외.
+      netAlertSetCollapsed(true);
+    }
+    _naDrag = null;
+  });
+  d.innerHTML = '<div style="display:flex;align-items:center;gap:9px;white-space:nowrap;">'
+    + '<div id="naLamps" style="display:flex;gap:4px;flex-shrink:0;"></div>'
+    + '<div id="naTitle" style="font-size:14.5px;font-weight:900;color:#f3d97b;flex-shrink:0;"></div>'
+    + '<div id="naSub" style="font-size:11.5px;opacity:.92;overflow:hidden;flex:1;min-width:0;"></div>'
+    + '<div id="naAct" style="flex-shrink:0;"></div>'
+    + '</div>';
+  const lamps = d.querySelector("#naLamps");
+  for (let i = 0; i < 5; i++) {
+    const l = document.createElement("div");
+    l.style.cssText = "width:6px;height:6px;border-radius:50%;"
+      + "background:radial-gradient(circle at 35% 35%,#ffe9a8,#d4af37 60%,#7a5c14);"
+      + "animation:naLampBlink 1.1s linear infinite;animation-delay:" + (i * 0.14) + "s;";
+    lamps.appendChild(l);
+  }
+  document.body.appendChild(d);
+  return d;
+})();
+/** act = {label, fn} — ★알림 안 1버튼 해결 (대표님 확정 2026-08-07 "버튼 누르면 바로 해결되게").
+ *  알림 몸통은 터치 투과(pointer-events:none), 버튼만 auto — 알림이 조작을 안 가로막으면서 버튼은 눌린다. */
+function netAlertShow(cause, title, sub, act) {
+  // ★새 알림 최초 등장 판정(대표님 지시 2026-08-13) — 지금 껏 아무것도 안 떠 있었으면(원형도 배너도
+  //   둘 다 숨김) 이번이 "처음"이라 원형으로 리셋한다. 이미 떠 있는 채로 갱신되는 거면(핑마다 반복호출)
+  //   대표님이 손으로 펼쳐둔 상태를 그대로 존중 — 매번 다시 접히면 안 됨.
+  const _wasHidden = !netAlertCause;
+  netAlertCause = cause;
+  if (_wasHidden) netAlertCollapsed = true;
+  netAlertEl.querySelector("#naTitle").textContent = title;
+  // ★전광판(대표님 지시 2026-08-07): 설명은 자르지 않고 왼쪽으로 흐르게. 글자수에 비례한 속도(8~30초/바퀴).
+  //   sub는 전부 내부 고정 문구라 HTML 삽입 안전(외부 입력 아님). UAC 카운트다운은 <b id> 숫자만 갈아끼워
+  //   애니메이션이 리셋되지 않는다.
+  const subHost = netAlertEl.querySelector("#naSub");
+  const dur = Math.min(30, Math.max(8, String(sub).replace(/<[^>]*>/g, "").length * 0.22));
+  const piece = '<span style="padding-right:64px;">' + sub + '</span>';
+  subHost.innerHTML = '<span style="display:inline-block;white-space:nowrap;'
+    + 'animation:naMarquee ' + dur + 's linear infinite;">' + piece + piece + '</span>';
+  const host = netAlertEl.querySelector("#naAct");
+  host.innerHTML = "";
+  if (act) {
+    const b = document.createElement("button");
+    b.textContent = act.label;
+    b.style.cssText = "pointer-events:auto;height:30px;padding:0 12px;border:none;border-radius:9px;font-size:12px;font-weight:900;color:#1a1405;"
+      + "background:linear-gradient(180deg,#f8e9a8 0%,#e3c25b 45%,#b8912a 55%,#e0be55 100%);box-shadow:0 2px 7px rgba(0,0,0,.5);";
+    b.addEventListener("touchend", (e) => { e.preventDefault(); e.stopPropagation(); act.fn(); }, { passive: false });
+    b.addEventListener("click", (e) => { e.stopPropagation(); act.fn(); });
+    host.appendChild(b);
+  }
+  netAlertSetCollapsed(netAlertCollapsed);   // ★원형/배너 중 지금 상태에 맞는 쪽만 표시
+  // ★위치 재교정 — 폭이 97vw로 넓어져 예전(좁던 시절) 저장 위치가 화면 밖일 수 있다. 뜰 때마다 화면 안으로.
+  if (netAlertEl.style.transform === "none") {
+    const _x = clamp(parseFloat(netAlertEl.style.left) || 0, 0, Math.max(0, innerWidth - netAlertEl.offsetWidth));
+    const _y = clamp(parseFloat(netAlertEl.style.top) || 0, 0, Math.max(0, innerHeight - netAlertEl.offsetHeight));
+    netAlertEl.style.left = _x + "px"; netAlertEl.style.top = _y + "px";
+  }
+}
+function netAlertHide(cause) {
+  if (cause && netAlertCause && netAlertCause !== cause) return;   // 다른 원인의 알림은 안 지움
+  netAlertCause = ""; netAlertEl.style.display = "none"; naCircleEl.style.display = "none";
+  netAlertCollapsed = true;   // ★다음에 새로 뜰 알림은 항상 원형부터 시작
+  const host = netAlertEl.querySelector("#naAct"); if (host) host.innerHTML = "";
+}
+function renderPing() {
+  const el = $("pingVal"); if (!el) return;
+  // ★회선 나쁘면 화질 버튼 자체가 빨갛게 물듦(대표님 승인 아이디어 2026-08-07) — "지금 이 화질은 무리"를 버튼이 직접 경고
+  const lb = $("lteBtn");
+  if (lb) lb.style.boxShadow = (pingBadStreak >= 2)
+    ? "0 0 14px rgba(255,60,60,.95), inset 0 0 8px rgba(255,60,60,.55)" : "";
+  if (pingRtt < 0) { el.textContent = ""; return; }
+  if (pingRtt >= 9999) { el.textContent = "끊김"; el.style.color = "#ff5252"; return; }
+  el.textContent = pingRtt + "ms";
+  el.style.color = pingRtt <= 150 ? "#39d353" : pingRtt <= 500 ? "#ffc93c" : "#ff5252";
+}
+// ★핑 1분 이력(대표님 승인 아이디어) — 순간값 말고 추세. pingVal 탭 = 최근 1분 최소/평균/최대 토스트.
+//   pingVal이 lteBtn(화질 순환 버튼) 안에 있어서 stopPropagation 필수 — 통계 보려다 화질이 바뀌면 안 된다.
+const pingHist = [];
+function pingHistPush(rtt) {
+  const now = performance.now();
+  pingHist.push({ t: now, r: rtt });
+  while (pingHist.length && now - pingHist[0].t > 60000) pingHist.shift();
+}
+(function () {
+  const el = $("pingVal"); if (!el) return;
+  el.style.pointerEvents = "auto";
+  el.addEventListener("touchend", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const rs = pingHist.map((h) => h.r).filter((r) => r < 9999);
+    if (!rs.length) { toast("핑 기록 없음"); return; }
+    const mn = Math.min.apply(null, rs), mx = Math.max.apply(null, rs);
+    const av = Math.round(rs.reduce((a, b) => a + b, 0) / rs.length);
+    const drop = pingHist.length - rs.length;
+    toast("📡 최근 1분 — 최소 " + mn + " · 평균 " + av + " · 최대 " + mx + "ms" + (drop ? " · 끊김 " + drop + "회" : ""));
+  }, { passive: false });
+})();
+function onPong() {
+  if (!pingSentAt) return;
+  pingRtt = Math.max(1, Math.round(performance.now() - pingSentAt));
+  pingSentAt = 0;
+  pingHistPush(pingRtt);   // ★1분 이력 적재 (탭=통계)
+  if (pingRtt >= 600) { pingBadStreak = Math.min(pingBadStreak + 1, 99); pingGoodStreak = 0; }
+  else if (pingRtt <= 300) { pingGoodStreak++; if (pingGoodStreak >= 3) pingBadStreak = 0; }
+  // 🚨 중앙 알림 연동 — 회선 탓임을 원인·기준·대처까지 그 자리에서 알림 / 회복 시 자동 소거
+  //   ★1버튼 해결(대표님 확정): 이미 LTE/SPEED(저화질)면 버튼 무의미 → 안내만. HD/AUTO면 [LTE 전환] 버튼.
+  if (pingRtt >= 1000 && pingBadStreak >= 2) {
+    const needBtn = (netMode === "hd" || netMode === "auto");
+    netAlertShow("line", "📡 회선 불량 " + pingRtt + "ms",
+      "평소 40~60ms — 지금 느린 건 LTE 회선 탓입니다." + (needBtn ? " 아래 버튼으로 즉시 가볍게 전환하세요." : " 잠시 기다리면 자동 회복됩니다."),
+      needBtn ? { label: "📶 LTE 모드로 전환", fn: () => {
+        netMode = "lte"; localStorage.setItem("netMode", "lte");
+        autoLow = false; clearTimeout(autoTimer);
+        applyNetBtn(); pushNet(); toast("📶 LTE — 균형");
+        netAlertHide("line");
+      } } : null);
+  } else if (pingRtt <= 500) { netAlertHide("line"); }
+  renderPing();
+}
+setInterval(() => {
+  if (pingSentAt) {   // 지난 ping이 2초 내 무응답 = 사실상 끊김/폭주 — 표시로 알림 (다음 pong 오면 자동 회복)
+    pingRtt = 9999; pingBadStreak = Math.min(pingBadStreak + 1, 99); pingGoodStreak = 0; pingHistPush(9999); renderPing();
+    if (pingBadStreak >= 2) netAlertShow("line", "📡 회선 끊김", "LTE 신호가 약해요 — 화면·터치 먹통은 회선 탓. 신호 좋은 곳으로 이동하면 자동 회복됩니다.");
+  }
+  pingSentAt = performance.now();
+  try { send({ type: "ping" }); } catch (e) { pingSentAt = 0; }
+}, 2000);
 
 // ───── 줌 패널 — 마우스중심 줌(−/+) + 프리셋(1~4) ─────
 const ZOOM_STEP = 1.8;   // 한 번 누를 때 줌 배율 (조절용)
@@ -4793,28 +5133,74 @@ function zPreAt(coord, vert) {                             // 좌표(가로=x, �
   return null;
 }
 // FLIP — 순서 바꾸기 전 위치 기록, 바꾼 후 새 위치 기준으로 역애니메이션
-function flipReorder(mutate) {
+// ★함정9호 수정(2026-08-08, 대표님 실측 "5번 드래그할 때 아래서 한번 잡아당기고 위로 올라간다"):
+//   드래그 중인 요소 자신까지 FLIP 대상에 포함시키면, insertBefore로 옮겨질 때마다 그 요소도
+//   "옛 위치→새 위치" 역보정 애니메이션을 또 얹어맞아 이중 움직임(잡아당김+올라감)이 생겼다.
+//   표준(드래그앤드롭 리오더링 표준 시공 명령서 2-4절) 원칙대로 "잡은 요소는 손가락을 그대로
+//   따라가고, FLIP은 옆으로 비켜나는 다른 요소들에만" 적용하도록 skip 인자를 추가한다.
+function flipReorder(mutate, skip) {
   const btns = [...zPanel.querySelectorAll(".zPre")];
   const first = new Map(btns.map(b => [b, b.getBoundingClientRect()]));
   mutate();
   const after = [...zPanel.querySelectorAll(".zPre")];
   after.forEach(b => {
+    if (b === skip) return;   // ★드래그 중인 요소 자신은 FLIP 제외 — 손가락 위치가 곧 정답이라 애니메이션 불필요
     const a = first.get(b); if (!a) return;
     const r = b.getBoundingClientRect();
     const dx = a.left - r.left, dy = a.top - r.top;
     if (!dx && !dy) return;
     b.style.transition = "none";
-    b.style.transform = `translate(${dx}px,${dy}px)`;
+    // ★독 물결(magnify wave, 2026-08-08)과 공존시키려고 transform 대신 별도 CSS 속성 translate를 쓴다
+    //   (표준 명령서 함정3호 방어 — FLIP의 이동과 물결의 확대를 같은 transform에 몰아넣으면 서로 덮어써
+    //   둘 다 깨진다. translate/scale은 서로 독립된 CSS 속성이라 한 요소에 동시에 걸어도 안전하다).
+    b.style.translate = `${dx}px ${dy}px`;
     requestAnimationFrame(() => {
-      b.style.transition = "transform .26s cubic-bezier(.34,1.28,.64,1)";
-      b.style.transform = "";
+      b.style.transition = "translate .26s cubic-bezier(.34,1.28,.64,1)";
+      b.style.translate = "";
     });
   });
+}
+// ★독 매그니피케이션 물결(2026-08-08, 대표님 지시 "맥북 독처럼") — 손끝(coord) 근처 슬롯일수록
+//   커진다. 가우시안 공식은 드래그앤드롭 표준 명령서 2-5절 그대로: scale = 1 + 0.22*exp(-d²/(2*55²)).
+//   ★폰은 마우스 호버가 없어 "길게 눌러 집은(dragging=true) 순간부터"가 곧 hover 구간이다.
+function _magnifyWave(coord, vert, exclude) {
+  zPanel.querySelectorAll(".zPre").forEach((el) => {
+    if (el === exclude) return;
+    const r = el.getBoundingClientRect();
+    const center = vert ? (r.top + r.height / 2) : (r.left + r.width / 2);
+    const d = coord - center;
+    const scale = 1 + 0.22 * Math.exp(-(d * d) / (2 * 55 * 55));
+    el.style.scale = scale.toFixed(3);
+  });
+}
+function _magnifyReset() {
+  zPanel.querySelectorAll(".zPre").forEach((el) => { el.style.scale = ""; el.style.transition = ""; });
+}
+// ★자석 스냅 촉각 피드백(대표님 "미친 아이디어" 지시, 2026-08-08) — 맥 독은 마우스라 소리·시각뿐이지만
+//   폰은 진동이 있다. 손끝이 슬롯 중심에 가까워질수록 존(zone)이 좁아지고, 존을 넘을 때마다(같은 존
+//   안에서는 반복 안 함) 점점 더 촘촘하고 강한 펄스를 준다 — 화면 안 보고도 손끝으로 느껴지게.
+const HAPTIC_ZONES = [80, 50, 25, 10];   // px, 큰 값→작은 값 = 멀음→가까움
+function _hapticCheck(coord, vert, exclude, lastZoneRef) {
+  let best = Infinity;
+  zPanel.querySelectorAll(".zPre").forEach((el) => {
+    if (el === exclude) return;
+    const r = el.getBoundingClientRect();
+    const center = vert ? (r.top + r.height / 2) : (r.left + r.width / 2);
+    best = Math.min(best, Math.abs(coord - center));
+  });
+  let zone = -1;
+  for (let i = 0; i < HAPTIC_ZONES.length; i++) { if (best < HAPTIC_ZONES[i]) zone = i; }
+  if (zone > lastZoneRef.v) {
+    try { navigator.vibrate?.(8 + zone * 5); } catch (_) {}   // 존이 좁아질수록(가까울수록) 더 강하게: 8·13·18·23ms
+  }
+  lastZoneRef.v = zone;
 }
 function bindZPreBtn(b) {                                  // 톡=점프 / 톡톡=저장 / 길게=저장 / 슬라이드=순서변경(가로·세로 다 됨)
   const n = b.dataset.n;
   let pTimer = null, pLong = false, dragging = false, tapTimer = null;
   let sx = 0, sy = 0;
+  const hapticZone = { v: -1 };   // ★드래그 세션마다 리셋 — 존 경계 넘을 때만 진동(반복 스팸 방지)
+  let swapCooldownUntil = 0;      // ★함정10호 방어(아래 touchmove 참고) — 직전 스왑의 FLIP 전환이 끝날 때까지 재판정 보류
   function saveHere() {
     curPresets()[n] = { cx:view.cx, cy:view.cy, z:view.z };
     saveAllPresets();
@@ -4823,6 +5209,7 @@ function bindZPreBtn(b) {                                  // 톡=점프 / 톡�
   }
   b.addEventListener("touchstart", (e) => {
     e.preventDefault(); pLong = false; dragging = false;
+    hapticZone.v = -1;
     sx = e.touches[0].clientX; sy = e.touches[0].clientY;
     pTimer = setTimeout(() => {                            // 길게 = 저장 (떼지 않고 가만히)
       if (dragging) return;
@@ -4834,23 +5221,34 @@ function bindZPreBtn(b) {                                  // 톡=점프 / 톡�
     if (!dragging && Math.hypot(dx, dy) > 8) {             // 8px 이상 슬라이드 = 드래그 모드 자동 진입
       dragging = true; clearTimeout(pTimer);
       b.classList.add("zDragging");
+      b.style.scale = "1.15";                              // ★집어든 자신은 고정 확대(맥독 드래그 아이콘처럼)
     }
     if (!dragging) return;
     e.preventDefault();
     const vert = zPanel.classList.contains("vert");
     const c = vert ? e.touches[0].clientY : e.touches[0].clientX;
+    _magnifyWave(c, vert, b);                              // ★독 물결 — 매 프레임, 순서변경 여부와 무관하게
+    _hapticCheck(c, vert, b, hapticZone);                   // ★자석 스냅 진동 — 매 프레임, 존 넘을 때만 발동
+    // ★함정10호 수정(2026-08-08, 대표님 실측 "4번이 비켜줄랑 말랑 튕긴다"): 스왑 직후 getBoundingClientRect()가
+    //   FLIP 전환(.26s) 중이라 애니메이션 도중의 위치를 돌려준다 — 가만히 있는 손가락 기준으로 그 "움직이는
+    //   중간 위치"의 중점이 매 프레임 달라지면서 판정이 되다 안 되다를 반복(진동/떨림)했다. 직전 스왑의
+    //   전환이 끝날 때까지(260ms, flipReorder 지속시간과 동일) 재판정을 보류해 안정된 좌표에서만 다시 잰다.
+    if (performance.now() < swapCooldownUntil) return;
     const over = zPreAt(c, vert);
     if (!over || over === b) return;
     const rc = over.getBoundingClientRect();
     const before = vert ? (c < rc.top + rc.height/2) : (c < rc.left + rc.width/2);
     flipReorder(() => {
       zPanel.insertBefore(b, before ? over : over.nextSibling);
-    });
+    }, b);
+    swapCooldownUntil = performance.now() + 260;
   }, { passive:false });
   b.addEventListener("touchend", (e) => {
     e.preventDefault();
     if (dragging) {
       b.classList.remove("zDragging");
+      b.style.scale = "";                                  // ★집었던 자신의 고정확대 해제
+      _magnifyReset();                                      // ★독 물결로 커졌던 나머지 슬롯들도 원복
       zOrder = [...zPanel.querySelectorAll(".zPre")].map(el => el.dataset.n);
       saveZOrder();
       dragging = false;
@@ -6585,7 +6983,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
 
   // ── 옵션 2: 9칸 커스터마이즈 패드 (각 칸 기능 자유배치 / 팔레트 / 편집·고정 / 우하단 이동·크기) ──
   const PAL = [
-    {a:"copy",l:"복사"},{a:"paste",l:"📲붙여"},{a:"key_enter",l:"엔터"},
+    {a:"copy",l:"복사"},{a:"paste",l:"📲"},{a:"key_enter",l:"엔터"},
     {a:"select_line",l:"줄/전체"},{a:"select_all",l:"전체선택"},
     {a:"mouse_left",l:"좌클릭🖱"},{a:"mouse_right",l:"우클릭🖱"},{a:"hk:alt,space",l:"창메뉴"},
     {a:"bright_up",l:"밝기🔆"},{a:"bright_down",l:"밝기🔅"},
@@ -6596,7 +6994,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) keep
     {a:"hk:up",l:"위 ↑"},{a:"hk:down",l:"아래 ↓"},{a:"hk:left",l:"왼 ←"},{a:"hk:right",l:"오 →"},
   ];
   // 🧰 앱의 모든 도크 버튼도 팔레트에 추가 (새로고침·캡처·클립보드·설정·무음·시계·크롬·클로드 등 9칸에 자유 배치)
-  try { if (typeof DOCK_BTNS !== "undefined" && Array.isArray(DOCK_BTNS)) DOCK_BTNS.forEach((d) => PAL.push({ a:"btn:"+d.id, l:(d.ico ? d.ico+" " : "")+d.name })); } catch (e) {}
+  try { if (typeof DOCK_BTNS !== "undefined" && Array.isArray(DOCK_BTNS)) DOCK_BTNS.forEach((d) => PAL.push({ a:"btn:"+d.id, l:(d.ico || d.name) })); } catch (e) {}   // 이모지 있으면 이모지만 (한글 name 제거 — 새로고침🔄·클립보드📋 등)
   try { if (document.getElementById("btnSettings")) PAL.push({ a:"btn:btnSettings", l:"⚙️ 설정" }); } catch (e) {}
   const PLABEL = {}; PAL.forEach((p) => { PLABEL[p.a] = p.l; });
   PLABEL["btn:btnDelete"] = "⌫";   // 한글 제거 — 아이콘만

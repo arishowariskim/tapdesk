@@ -112,6 +112,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("fold5")
 
+# ⚖️ 색판정 기준 (명령서 제11조·23조) — 기준파일 없으면 프로브(자동판정) 기동 거부
+_JUDGE_FILE = CANONICAL / "_judge" / "turbo_color.judge.json"
+_judge = None
+_judge_fail_streak = 0
+try:
+    _judge = json.loads(_JUDGE_FILE.read_text(encoding="utf-8"))
+    log.info(f"⚖️ 색판정 기준 로드: PASS Δ≤{_judge['pass_max_delta']} / "
+             f"FAIL Δ>{_judge['fail_delta']}×{_judge['fail_streak']}연속 → 자동 JPEG 폴백")
+except Exception as _je:
+    _judge = None
+    log.warning(f"⚖️ judge.json 없음/불량 → 색검증 프로브 기동 거부 (제23조): {_je}")
+
 # 🛩 블랙박스 — 네이티브 급사(액세스 위반 등) 시 전 스레드 스택을 남김 (2026-07-04 원인불명 프로세스 사망 추적)
 import faulthandler
 try:
@@ -328,6 +340,28 @@ def fast_mouse_up(button: str = "left") -> None:
 
 def fast_scroll(delta: int) -> None:
     _send_mouse(MOUSEEVENTF_WHEEL, data=int(delta))
+
+
+def secure_desktop_active() -> bool:
+    """🛡 UAC 등 보안 데스크톱이 입력을 잡고 있는가 (2026-08-07 대표님 발주 "사용불가 원인 중앙 알림").
+    보안 데스크톱이 뜨면 SendInput·화면갱신이 통째로 막혀 원격(폰)에서는 이유 없이 먹통으로 보인다 —
+    그 순간을 감지해 폰에 pc_block 신호를 보내기 위한 판정 함수. ★서버 재시작 후부터 유효."""
+    if _user32 is None:
+        return False
+    try:
+        h = _user32.OpenInputDesktop(0, False, 0x0001)   # DESKTOP_READOBJECTS
+        if not h:
+            return True    # 입력 데스크톱 자체를 못 연다 = 보안 데스크톱(UAC) 활성
+        try:
+            buf = ctypes.create_unicode_buffer(64)
+            need = ctypes.c_ulong(0)   # ★DWORD=c_ulong — ctypes.wintypes는 이 파일에 임포트 안 돼 있어 AttributeError로 감지가 조용히 죽었다(2026-08-07 1차 실사격 불발 원인)
+            if _user32.GetUserObjectInformationW(h, 2, buf, ctypes.sizeof(buf), ctypes.byref(need)):   # UOI_NAME=2
+                return buf.value.lower() != "default"    # 평상시 입력 데스크톱 이름 = "Default"
+            return False
+        finally:
+            _user32.CloseDesktop(h)
+    except Exception:
+        return False
 
 
 # ───────────────────────── 화면 캡처 ─────────────────────────
@@ -771,16 +805,25 @@ def grab_region(view: dict, last_hash):
     box = crop_box(view)
     # [2026-07-03] 전 모니터 dxcam GPU 캡처 — 좌표맵으로 (device,output) 매칭, 실패 시 mss 폴백.
     cam, _ox, _oy = get_dxcam_for(m)
+    arr = None
     if cam is not None:
         # dxcam region은 해당 출력 원점 기준 상대좌표. BGRA (H,W,4)
         region = (box["left"] - _ox, box["top"] - _oy,
                   box["left"] - _ox + box["width"], box["top"] - _oy + box["height"])
-        with _dx_grab_lock:
-            raw_np = cam.grab(region=region)
-        if raw_np is None:
-            return None, last_hash              # dxcam이 변화 없으면 None 반환 (정지화면 스킵)
-        arr = raw_np                            # 이미 BGRA numpy — 변환 0
-    else:
+        # [2026-07-08 질식수술] 락 무한대기 → to_thread 풀 고갈 → 서버 6초+ 무응답(경비원 🧊 반복)의 뿌리.
+        # 1초 초과면 그 dxcam은 병든 것 — 리셋 걸고 이번 프레임은 mss로.
+        if _dx_grab_lock.acquire(timeout=1.0):
+            try:
+                raw_np = cam.grab(region=region)
+            finally:
+                _dx_grab_lock.release()
+            if raw_np is None:
+                return None, last_hash          # dxcam이 변화 없으면 None 반환 (정지화면 스킵)
+            arr = raw_np                        # 이미 BGRA numpy — 변환 0
+        else:
+            log.warning("🧊 dxcam 락 1초 초과 — 질식 방지: dxcam 리셋 + 이번 프레임 mss 폴백")
+            _dxcam_reset()
+    if arr is None:
         # mss — numpy 직통 (BGRA). zero-copy: frombuffer로 내부 버퍼 직접 참조
         raw = get_mss().grab(box)
         arr = _np.frombuffer(raw.raw, _np.uint8).reshape((raw.height, raw.width, 4))
@@ -848,6 +891,10 @@ class _TurboEncoder:
         self.last_get = time.time()
         self._dropping = False   # 큐 포화로 드랍 시작 → 다음 키프레임까지 통째 스킵(참조체인 보호)
         self.last_frame = None   # 최근 원본 프레임(BGRA) — 🎨 색검증 프로브용
+        self._wrote = 0          # 📈 심박 계측 — 기록한 프레임 수
+        self._read_aus = 0       # 📈 심박 계측 — 판독한 AU 수
+        self.last_read = time.time()   # 판독 심박 시각 — 가뭄 판정은 이게 멎었을 때만 (GOP드랍≠가뭄)
+        self.idle_grabs = 0      # 연속 무변화 캡처 수 — 프로브는 정지화면(≥judge 기준)에서만
         # [2026-07-04 실측] bufsize=1프레임분(0.03초)이면 키프레임이 굶어 1초마다 연붉은 펄스(R-G 진폭 7.0).
         # 버퍼 1초 + GOP 4초 + spatial-aq → 펄스 진폭 0.0 (lab2_pulse.py 실측)
         bufsize_k = self.kbps
@@ -864,7 +911,7 @@ class _TurboEncoder:
                "-color_range", "pc", "-colorspace", "bt709",
                "-color_primaries", "bt709", "-color_trc", "bt709",
                "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ull",
-               "-profile:v", "high", "-bf", "0", "-g", str(self.fps * 4),
+               "-profile:v", "high", "-bf", "0", "-g", str(self.fps * 2),
                "-spatial-aq", "1", "-aq-strength", "8",
                "-b:v", f"{self.kbps}k", "-maxrate", f"{self.kbps}k",
                "-bufsize", f"{bufsize_k}k",
@@ -928,21 +975,38 @@ class _TurboEncoder:
         dx_fail = 0            # dxcam 연속 실패 — 10회면 이 세션은 mss로 영구 전환 (검은화면 방지)
         while self.alive:
             t0 = time.time()
-            if time.time() - self.last_get > 5.0:      # 소비자 없음 → 자가 종료
-                log.info("💤 터보: 5초간 소비자 없음 → 자가 종료")
+            if time.time() - self.last_get > 15.0:     # 소비자 없음 → 자가 종료
+                # [04:17 실측] LTE 혼잡 시 send가 수 초 블록 → 5초 룰이 산 인코더를 자살시켜
+                # 15초 주기 재기동 루프(=폰 "5초 후에야 줌" 체감)의 진범. 15초로 완화.
+                log.info("💤 터보: 15초간 소비자 없음 → 자가 종료")
                 self.stop()
                 return
             try:
                 cam, ox, oy = (None, 0, 0) if dx_fail >= 10 else get_dxcam_for(self.mon)
                 arr = None
                 if cam is not None:
-                    with _dx_grab_lock:                # 동시 grab = D3D INVALID_CALL 방지
-                        arr = cam.grab(region=(0, 0, self.w, self.h))   # 변화 없으면 None
-                    dx_fail = 0
+                    if _dx_grab_lock.acquire(timeout=1.0):   # 동시 grab 방지 + 질식수술(1초 상한)
+                        try:
+                            arr = cam.grab(region=(0, 0, self.w, self.h))   # 변화 없으면 None
+                        finally:
+                            _dx_grab_lock.release()
+                        dx_fail = 0
+                    else:
+                        log.warning("🧊 터보 캡처: dxcam 락 1초 초과 → 리셋+이번 프레임 재전송")
+                        _dxcam_reset()
+                        arr = None
+                    self.idle_grabs = self.idle_grabs + 1 if arr is None else 0   # 정지화면 연속 카운트
                 else:
                     raw = get_mss().grab({"left": self.mon["left"], "top": self.mon["top"],
                                           "width": self.w, "height": self.h})
                     arr = _np.frombuffer(raw.raw, _np.uint8).reshape((raw.height, raw.width, 4))
+                if arr is None and last_bytes is None:
+                    # 💧 콜드스타트 마중물 [2026-07-05 실측] — 정지화면이면 dxcam이 None만 반환해
+                    # 첫 프레임을 영영 못 받고 인코더가 굶어죽음(가뭄 3연속 사건의 진범, 단독재현 0.94s vs 서버 무한).
+                    raw0 = get_mss().grab({"left": self.mon["left"], "top": self.mon["top"],
+                                           "width": self.w, "height": self.h})
+                    arr = _np.frombuffer(raw0.raw, _np.uint8).reshape((raw0.height, raw0.width, 4))
+                    log.info("💧 터보: 정지화면 콜드스타트 → mss 마중물 1프레임")
                 if arr is not None:
                     if arr.shape[0] != self.h or arr.shape[1] != self.w:
                         arr = _np.ascontiguousarray(arr[:self.h, :self.w])
@@ -950,6 +1014,9 @@ class _TurboEncoder:
                 if last_bytes is not None and len(last_bytes) == nbytes:
                     self.last_frame = last_bytes        # 🎨 프로브 기준(원본색)
                     self.proc.stdin.write(last_bytes)   # 정지화면도 재전송(비트 거의 0, fps 유지)
+                    self._wrote += 1
+                    if self._wrote % 90 == 0:           # 📈 심박(3초 주기) — 가뭄 단계 확정용 계측
+                        log.info(f"📈 터보 심박: 기록 {self._wrote}프레임 / 판독 {self._read_aus}AU / 큐 {self.au_q.qsize()}")
             except (BrokenPipeError, OSError):
                 self.alive = False
                 return
@@ -983,6 +1050,8 @@ class _TurboEncoder:
                 au = buf[aud_pos[0]:aud_pos[1]]
                 buf = buf[aud_pos[1]:]
                 is_key = any(t == 5 for s, t in _iter_nals(au))
+                self._read_aus += 1
+                self.last_read = time.time()
                 if self._dropping and not is_key:
                     continue                              # 드랍 중 — P프레임 하나만 빠져도 다음 키까지 다 깨지므로 통째 스킵
                 try:
@@ -1556,7 +1625,10 @@ async def handle_message(msg: dict):
     if t == "turbo_mode":          # 🚀 터보(H.264 NVENC) 온/오프 — 폰이 WebCodecs 가능할 때만 보냄
         STATE["turbo"] = bool(msg.get("on", False))
         STATE["turbo_fps"] = max(10, min(60, int(msg.get("fps", TURBO_FPS))))
-        STATE["turbo_kbps"] = max(2000, min(40000, int(msg.get("kbps", TURBO_KBPS))))
+        _kb = int(msg.get("kbps", TURBO_KBPS))
+        if STATE.get("lte"):
+            _kb = min(_kb, 8000)   # 📶 LTE 시작 안전값 (04:17 TCP 정체 실측)
+        STATE["turbo_kbps"] = max(2000, min(40000, _kb))
         STATE["turbo_kbps_max"] = STATE["turbo_kbps"]   # 사용자 상한 — 적응조절이 이 위로는 안 올라감
         if not STATE["turbo"]:
             _turbo_stop()
@@ -1564,8 +1636,41 @@ async def handle_message(msg: dict):
                  f"({STATE['turbo_fps']}fps {STATE['turbo_kbps']}kbps)")
         return {"type": "turbo_ok", "on": STATE["turbo"],
                 "fps": STATE["turbo_fps"], "kbps": STATE["turbo_kbps"]}
-    if t == "turbo_probe_result":  # 🎨 폰 디코드 색 회신 — 원본과의 차이를 로그로 (색사고 원인 실측)
-        log.info(f"🎨 색검증: PC원본 {msg.get('src')} → 폰디코드 {msg.get('got')} 최대Δ {msg.get('d')}")
+    if t == "frame_report":        # 📊 검은화면 진단 계측 (2026-07-13) — 폰 수신·드로우 자가보고
+        log.info(f"📊 폰 자가보고: jpeg수신 {msg.get('jpeg')} / vid수신 {msg.get('vid')} / "
+                 f"드로우 {msg.get('drawn')} / sched={msg.get('sched')} pend={msg.get('pend')} cv={msg.get('cv')}")
+        return None
+    if t == "turbo_probe_result":  # 🎨 폰 디코드 색 회신 → ⚖️ judge.json 기준으로 프로그램이 PASS/FAIL 판정
+        global _judge_fail_streak
+        try:
+            _d = float(msg.get("d", 0))
+        except (TypeError, ValueError):
+            return None
+        if _judge is None:   # 제23조 — 기준 없으면 판정 없음 (프로브도 안 보내지만 이중 방어)
+            log.info(f"🎨 색검증(판정기준 없음): Δ{_d}")
+            return None
+        if _d <= _judge["pass_max_delta"]:
+            _judge_fail_streak = 0
+            log.info(f"🎨 색판정 PASS: Δ{_d} ≤ {_judge['pass_max_delta']} "
+                     f"(PC {msg.get('src')} → 폰 {msg.get('got')})")
+        elif _d > _judge["fail_delta"]:
+            _judge_fail_streak += 1
+            log.warning(f"🎨 색판정 FAIL {_judge_fail_streak}/{_judge['fail_streak']}: "
+                        f"Δ{_d} > {_judge['fail_delta']} (PC {msg.get('src')} → 폰 {msg.get('got')})")
+            if _judge_fail_streak >= _judge["fail_streak"]:
+                _judge_fail_streak = 0
+                STATE["turbo"] = False
+                _turbo_stop()
+                log.warning("🎨 색판정 확정 FAIL → 자동조치 집행: 터보 OFF·JPEG 폴백 (judge.json, 사람 손 0)")
+                if _push is not None:
+                    try:
+                        await _push({"type": "toast", "text": "🎨 색 이상 자동감지 → 일반 모드 복귀"})
+                    except Exception:
+                        pass
+                return {"type": "turbo_ok", "on": False}
+        else:
+            _judge_fail_streak = 0   # 주의 구간(5<Δ≤10) — 연속성 끊김
+            log.info(f"🎨 색판정 주의: Δ{_d} (합격선 초과·불합격선 이내)")
         return None
     if t == "monitor_reset":                    # [모니터 재셋팅] = 캡처 엔진 재초기화 (자폭 없음)
         global _mss_generation
@@ -2035,12 +2140,41 @@ _push = None                       # 현재 연결된 폰으로 dict 보내는 �
 _active_socks = []                 # 🔒 살아있는 폰 WS들 (단일 폰 정책 — 새 연결 시 옛 것 닫음, 중복 스트림=깜빡임/더빨리 방지)
 
 
-OTA_VERSION = 18  # [2026-07-03] v18 = 터보엔진(https 7443 우선 + http 폴백). aapt로 com.aris.tapdesk 검증 완료
+OTA_VERSION = 19  # [2026-07-08] v19 = 눕지 않는 앱(에러 시 2초마다 https↔http 무한 재시도, 성공 시 리셋). aapt 검증 완료
 _OTA_APK = ROOT / "app-debug.apk"
 
 @app.get("/ota/version")
 async def ota_version():
     return {"version": OTA_VERSION}
+
+
+@app.get("/api/phone-active")
+async def phone_active():
+    """★대표님 승인(2026-08-18): 클로드함교(8185)의 하트비트와 같은 목적 - 지금 폰이 TapDesk에
+    실제로 연결돼 화면을 보고 있는지. 7777 폰캡처 서버가 이걸로 "TapDesk를 보고 있나" 판단한다.
+    ★한계: 직접(로컬/Tailscale) 연결만 잡음 - 릴레이(외부망) 경유 연결은 아직 이 신호에 안 잡힘,
+    그 경우엔 기존처럼 PC 포커스된 창에 붙여넣기로 폴백됨(정직하게 안 되는 척 안 함)."""
+    return {"active": len(_active_socks) > 0}
+
+
+@app.get("/cert-status")
+async def cert_status():
+    """🔒 터보엔진 TLS 인증서 상태 (대표님 확정 2026-08-17) — phone.html 배지용.
+    server.py 자신과 같은 포트/프로토콜로 응답하므로 https(7443)에서도 mixed-content 차단 없이 fetch 가능
+    (watchdog:7781은 평문 http뿐이라 https 페이지에서 직접 fetch하면 브라우저가 막는다 — 그래서 여기 별도 추가).
+    실제 갱신 로직은 watchdog.py가 한다(여긴 순수 조회만, 부작용 없음)."""
+    try:
+        from cryptography import x509
+        from datetime import datetime as _dt
+        crt = ROOT / "_ts.crt"
+        if not crt.exists():
+            return {"days_left": None, "healthy": False}
+        cert = x509.load_pem_x509_certificate(crt.read_bytes())
+        not_after = cert.not_valid_after_utc if hasattr(cert, "not_valid_after_utc") else cert.not_valid_after
+        days = (not_after.replace(tzinfo=None) - _dt.utcnow()).days
+        return {"days_left": days, "healthy": days > 14, "renew_threshold_days": 14}
+    except Exception as e:
+        return {"days_left": None, "healthy": False, "error": str(e)[:150]}
 
 
 @app.get("/turbo-set")
@@ -2052,6 +2186,8 @@ async def turbo_set(token: str = "", on: int = 0, fps: int = 0, kbps: int = 0):
     if fps:
         STATE["turbo_fps"] = max(10, min(60, fps))
     if kbps:
+        if STATE.get("lte"):
+            kbps = min(kbps, 8000)   # 📶 LTE 시작 안전값 — 20M 버스트가 TCP 정체→지연 5초+의 뿌리 (04:17 실측)
         STATE["turbo_kbps"] = max(2000, min(40000, kbps))
         STATE["turbo_kbps_max"] = STATE["turbo_kbps"]
     if not STATE["turbo"]:
@@ -2149,6 +2285,79 @@ async def save_settings(request: Request):
     except Exception as e:
         log.warning(f"설정 저장 오류: {e}")
         return JSONResponse({"ok": False, "msg": str(e)})
+
+
+# 📡 LADB식 무선ADB 자가페어링(대표님 지시 2026-08-13, 설계도 Downloads\슈퍼 LADB 무선 바이너리 디버깅.md §6) —
+#    MicBubbleApp이 폰 스스로 5555를 열면(AdbSelfPair) 여기로 보고 → PC가 붙어서 실측만(공유키라 허용팝업 없음).
+ADB_EXE = r"C:\Users\GAPER\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+ADB_PHONE_TS = "100.96.143.83"          # 폰 Tailscale 고정 IP
+ADB_PORT = 5555
+ADB_STATE_FILE = CANONICAL / "adb_state.json"
+_adb_lock = threading.Lock()
+_adb_running = False
+
+def _adb_state_load() -> dict:
+    try:
+        return json.loads(ADB_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"adb_ready": False, "last_connect_port": 0, "last_seen_at": 0.0,
+                "last_ok_at": 0.0, "last_msg": "이력 없음", "log": []}
+
+def _adb_state_save(st: dict) -> None:
+    tmp = ADB_STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(ADB_STATE_FILE)   # ★원자적 쓰기(0바이트 사고 방지 — 셀리나 pcmic 관례)
+
+def _adb_run(args, timeout=15):
+    try:
+        r = subprocess.run([ADB_EXE] + args, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except Exception as e:
+        return -1, f"EXC {e}"
+
+def _adb_connect_and_verify():
+    """폰이 이미 5555를 열었다는 전제 — PC는 붙어서 실측만. 공유키라 허용 팝업 없음."""
+    st = _adb_state_load(); log_lines = []
+    def rec(m):
+        log_lines.append(m); st["last_msg"] = m; st["log"] = log_lines[-8:]; _adb_state_save(st)
+    rc, out = _adb_run(["connect", f"{ADB_PHONE_TS}:{ADB_PORT}"])
+    rec(f"connect {ADB_PHONE_TS}:{ADB_PORT} rc={rc} {out.strip()[:80]}")
+    rc, out = _adb_run(["-s", f"{ADB_PHONE_TS}:{ADB_PORT}", "shell", "echo", "OK5555"])
+    ok = (rc == 0 and "OK5555" in out)
+    st.update({"adb_ready": ok, "last_ok_at": time.time() if ok else st.get("last_ok_at", 0.0),
+               "last_msg": ("★5555 연결 성공" if ok else f"실패: echo 무응답 rc={rc}"), "log": log_lines[-8:]})
+    _adb_state_save(st)
+
+def _adb_kickoff():
+    def run():
+        global _adb_running
+        with _adb_lock:
+            if _adb_running: return
+            _adb_running = True
+        try: _adb_connect_and_verify()
+        finally:
+            with _adb_lock:
+                _adb_running = False
+    threading.Thread(target=run, daemon=True).start()
+
+@app.post("/adb/report")
+async def adb_report(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    st = _adb_state_load()
+    st.update({"last_connect_port": int(body.get("connect_port", 0) or 0),
+               "last_seen_at": time.time(),
+               "last_msg": f"폰 보고 접수(event={body.get('event','?')}, phone5555={body.get('adb5555_ready')})"})
+    _adb_state_save(st)
+    _adb_kickoff()
+    log.info(f"📡 ADB 보고: {body}")
+    return JSONResponse({"ok": True, "queued": True})
+
+@app.get("/adb/state")
+async def adb_state():
+    return JSONResponse(_adb_state_load())
 
 
 # 🎙 음성 명령어 — 키워드→동작 매핑. phone.html 메뉴판 + 녹음 버블이 둘 다 읽어 씀 (단일 진실 소스).
@@ -2351,6 +2560,253 @@ async def upload_from_phone(request: Request):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+# ══════════ 폰버블 STT 엔진 (제미나이/위스퍼) — 31_구글STT 상주 전사 재사용 (2026-07-07) ══════════
+# 폰이 발화 wav를 올리면 → PC 상주 전사 프로세스(--serve)가 받아써서 → 텍스트를 폰에 돌려줌
+# (타이핑·자막·AI다듬기·음성명령 분기는 폰의 기존 로직이 그대로 처리)
+_STT_PY = r"C:\Users\GAPER\AppData\Local\Programs\Python\Python313\python.exe"
+_STT_ENGINES_DIR = r"E:\1._AI_SaaS 제작소\1.SaaS_제품\31_구글STT\3_백엔드\engines"
+_STT_TMP = Path(r"C:\Users\Public\tapdesk_stt")
+_stt_procs: dict = {}
+_stt_locks = {"gemini": threading.Lock(), "whisper": threading.Lock()}
+
+
+def _stt_get_proc(engine: str):
+    p = _stt_procs.get(engine)
+    if p is not None and p.poll() is None:
+        return p
+    script = os.path.join(_STT_ENGINES_DIR, f"engine_{engine}.py")
+    _STT_TMP.mkdir(parents=True, exist_ok=True)
+    errf = open(_STT_TMP / f"engine_{engine}_err.log", "ab")   # 사인 채증용 (침묵사 금지)
+    p = subprocess.Popen([_STT_PY, script, "--serve"],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=errf, cwd=_STT_ENGINES_DIR,
+                         creationflags=0x08000000)
+    deadline = time.time() + 90   # 위스퍼 모델 로딩 대기
+    while time.time() < deadline:
+        line = p.stdout.readline().decode("utf-8", "replace").strip()
+        if line == "READY":
+            _stt_procs[engine] = p
+            log.info(f"🎙 폰버블 STT 상주엔진 기동: {engine}")
+            return p
+        if not line and p.poll() is not None:
+            break
+    try:
+        p.kill()
+    except Exception:
+        pass
+    raise RuntimeError(f"STT 엔진({engine}) 기동 실패")
+
+
+def _stt_transcribe(engine: str, wav_bytes: bytes) -> str:
+    with _stt_locks[engine]:
+        p = _stt_get_proc(engine)
+        _STT_TMP.mkdir(parents=True, exist_ok=True)
+        f = _STT_TMP / f"u_{int(time.time() * 1000)}.wav"
+        f.write_bytes(wav_bytes)
+        try:
+            p.stdin.write((str(f) + "\n").encode("utf-8"))
+            p.stdin.flush()
+            deadline = time.time() + 40
+            while time.time() < deadline:
+                line = p.stdout.readline().decode("utf-8", "replace").strip()
+                if line.startswith("FINAL:"):
+                    return line[6:].strip()
+                if line.startswith("ERROR:"):
+                    raise RuntimeError(line[6:])
+                if not line and p.poll() is not None:
+                    _stt_procs.pop(engine, None)
+                    raise RuntimeError("STT 엔진 프로세스 사망")
+            raise RuntimeError("STT 응답 시간 초과")
+        finally:
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
+
+@app.post("/stt-audio")
+async def stt_audio(request: Request):
+    """폰버블 발화 wav → PC측 STT(제미나이/위스퍼) 전사 → {"text"} 반환."""
+    if request.headers.get("x-token", "") != TOKEN:
+        return JSONResponse({"ok": False}, status_code=403)
+    engine = request.headers.get("x-engine", "whisper")
+    if engine not in ("gemini", "whisper"):
+        return JSONResponse({"ok": False, "msg": "unknown engine"}, status_code=400)
+    wav = await request.body()
+    if not wav or len(wav) < 1000:
+        return {"ok": True, "text": ""}
+    try:
+        text = await asyncio.to_thread(_stt_transcribe, engine, wav)
+    except Exception as e:
+        log.warning(f"🎙 /stt-audio 실패({engine}): {e}")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    log.info(f"🎙 폰버블 전사({engine}): {text[:40]}")
+    return {"ok": True, "text": text}
+
+
+# ── ★v2 진짜 스트리밍 (2026-07-07): 폰이 PCM을 흘리면 엔진 --stream 프로세스로 릴레이,
+#    확정 문장(FINAL)은 폴링(/stt-stream-poll)으로 회수 → 폰이 기존 확정 로직으로 처리 ──
+_stt_streams: dict = {}
+_stt_stream_lock = threading.Lock()
+
+
+def _stream_reader(sid: str, proc):
+    try:
+        for raw in iter(proc.stdout.readline, b""):
+            line = raw.decode("utf-8", "replace").strip()
+            if line.startswith("FINAL:"):
+                st = _stt_streams.get(sid)
+                if st:
+                    st["q"].put(line[6:].strip())
+                    log.info(f"🎙 v2 확정(sid={sid[:6]}): {line[6:46]}")
+    except Exception:
+        pass
+
+
+def _stream_get(sid: str, engine: str):
+    with _stt_stream_lock:
+        st = _stt_streams.get(sid)
+        if st and st["proc"].poll() is None:
+            return st
+        script = os.path.join(_STT_ENGINES_DIR, f"engine_{engine}.py")
+        _STT_TMP.mkdir(parents=True, exist_ok=True)
+        errf = open(_STT_TMP / f"stream_{engine}_err.log", "ab")
+        proc = subprocess.Popen([_STT_PY, "-u", script, "--stream"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=errf, cwd=_STT_ENGINES_DIR,
+                                creationflags=0x08000000)
+        st = {"proc": proc, "q": queue.Queue(), "t": time.time(), "closed": False}
+        _stt_streams[sid] = st
+        threading.Thread(target=_stream_reader, args=(sid, proc), daemon=True).start()
+        log.info(f"🎙 v2 스트림 릴레이 기동: {engine} sid={sid[:6]}")
+        return st
+
+
+def _stream_janitor():
+    """유휴 60초 스트림 정리 (폰이 갑자기 사라져도 프로세스 안 쌓이게)"""
+    while True:
+        time.sleep(30)
+        now = time.time()
+        with _stt_stream_lock:
+            for sid in list(_stt_streams.keys()):
+                st = _stt_streams[sid]
+                if now - st["t"] > 60:
+                    try:
+                        st["proc"].kill()
+                    except Exception:
+                        pass
+                    _stt_streams.pop(sid, None)
+
+
+threading.Thread(target=_stream_janitor, daemon=True, name="SttStreamJanitor").start()
+
+
+@app.post("/stt-stream-up")
+async def stt_stream_up(request: Request):
+    """폰 → PCM(16k mono 16bit) 연속 업로드 (chunked). 녹음 끝나면 연결 종료."""
+    if request.headers.get("x-token", "") != TOKEN:
+        return JSONResponse({"ok": False}, status_code=403)
+    engine = request.headers.get("x-engine", "gemini")
+    if engine != "gemini":
+        return JSONResponse({"ok": False, "msg": "v2 스트리밍은 gemini 전용"}, status_code=400)
+    sid = request.headers.get("x-sid", "")
+    if not sid:
+        return JSONResponse({"ok": False, "msg": "sid 없음"}, status_code=400)
+    try:
+        st = await asyncio.to_thread(_stream_get, sid, engine)
+    except Exception as e:
+        log.warning(f"🎙 v2 기동 실패: {e}")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    proc = st["proc"]
+    got = 0
+    try:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            await asyncio.to_thread(proc.stdin.write, chunk)
+            await asyncio.to_thread(proc.stdin.flush)
+            got += len(chunk)
+            st["t"] = time.time()
+    except Exception as e:
+        log.warning(f"🎙 v2 업로드 끊김(sid={sid[:6]}): {e}")
+    finally:
+        try:
+            proc.stdin.close()   # EOF → 엔진이 8초 유예 후 자기 정리
+        except Exception:
+            pass
+        st["closed"] = True
+    log.info(f"🎙 v2 업로드 종료(sid={sid[:6]}): {got}바이트")
+    return {"ok": True, "bytes": got}
+
+
+@app.post("/gemini-polish")
+async def gemini_polish(request: Request):
+    """★하이브리드(2026-07-07): 폰내장 STT 초벌 텍스트 → 제미나이 flash-lite 오타·띄어쓰기 교정 (~1초).
+    STT 속도는 폰내장, 최종 문장력은 제미나이 — 두 마리 토끼."""
+    try:
+        d = await request.json()
+    except Exception:
+        d = {}
+    if d.get("token") != TOKEN:
+        return JSONResponse({"ok": False}, status_code=403)
+    raw = (d.get("text") or "").strip()
+    if not raw:
+        return {"ok": True, "text": ""}
+    try:
+        text = await asyncio.to_thread(_gemini_polish_text, raw)
+    except Exception as e:
+        log.warning(f"✨ polish 실패: {e}")
+        return {"ok": True, "text": raw}   # 실패 시 원문 유지 (타이핑 안 끊김)
+    return {"ok": True, "text": text}
+
+
+_gp_client = [None]
+
+
+def _gemini_polish_text(raw: str) -> str:
+    from google import genai
+    from google.genai import types
+    if _gp_client[0] is None:
+        key = ""
+        for kf in (r"C:\Users\Public\구글음성STT\gemini_key.txt",
+                   os.path.join(os.path.expandvars(r"%LOCALAPPDATA%"), "구글음성STT", "gemini_key.txt")):
+            try:
+                key = open(kf, encoding="utf-8").read().strip()
+                if key:
+                    break
+            except Exception:
+                pass
+        _gp_client[0] = genai.Client(api_key=key)
+    cfg = types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(thinking_budget=0),   # ★핵심: thinking off = 9초→1초
+        system_instruction="너는 받아쓰기 교정기다. 입력 문장의 오타·띄어쓰기·문장부호만 자연스럽게 고쳐라. "
+                           "의미·단어를 바꾸거나 새 내용을 더하지 마라. 설명 없이 고친 문장만 출력하라.")
+    r = _gp_client[0].models.generate_content(
+        model="gemini-2.5-flash-lite", contents=raw, config=cfg)
+    out = (r.text or "").strip()
+    return out if out else raw
+
+
+@app.get("/stt-stream-poll")
+async def stt_stream_poll(request: Request):
+    """폰이 확정 문장 회수 (400ms 주기 폴링)."""
+    if request.headers.get("x-token", "") != TOKEN:
+        return JSONResponse({"ok": False}, status_code=403)
+    sid = request.query_params.get("sid", "")
+    st = _stt_streams.get(sid)
+    if st is None:
+        return {"ok": True, "texts": [], "alive": False}
+    texts = []
+    try:
+        while True:
+            texts.append(st["q"].get_nowait())
+    except Exception:
+        pass
+    if texts:
+        st["t"] = time.time()
+    return {"ok": True, "texts": texts, "alive": st["proc"].poll() is None}
+
+
 @app.post("/phone-capture")
 async def phone_capture(request: Request):
     """📸 target별 캡처: phone=폰(TypeService→/upload 직접), mon0~3=해당 모니터 mss 캡처."""
@@ -2435,7 +2891,7 @@ async def phone_capture(request: Request):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
-_MICBUBBLE_APK = Path(__file__).parent / "MicBubbleApp" / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+_MICBUBBLE_APK = Path(__file__).parent / "_app" / "MicBubbleApp" / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"  # 🩹 실제 위치는 _app/ 하위 — 경로 오타 수정 (대표님 지시 2026-07-06)
 
 @app.get("/micbubble-version")
 async def micbubble_version():
@@ -2451,7 +2907,7 @@ async def micbubble_version():
                 pass
     except Exception:
         pass
-    gradle = Path(__file__).parent / "MicBubbleApp" / "app" / "build.gradle"
+    gradle = Path(__file__).parent / "_app" / "MicBubbleApp" / "app" / "build.gradle"  # 🩹 경로 오타 수정 (대표님 지시 2026-07-06)
     version_code = 0
     if gradle.exists():
         for line in gradle.read_text(encoding="utf-8").splitlines():
@@ -2612,6 +3068,12 @@ async def ws_endpoint(ws: WebSocket):
     # 🔒 단일 폰 정책 — 로컬 연결만 적용. 릴레이(_RelayWS)는 제외.
     # (릴레이와 로컬이 서로 _active_socks를 통해 kick하면 무한 재연결 루프 발생)
     _is_relay = isinstance(ws, _RelayWS)
+    # 🛡 릴레이 유령 가드 (2026-07-13) — 릴레이 뒤에 실제 폰이 없어도 PC가 초당 20~30장을
+    # 인코딩·업로드하던 낭비/로그오염 차단. 폰의 실제 인바운드 신호가 최근일 때만 스트리밍.
+    _relay_alive = [0.0]   # 릴레이 뒤 폰 마지막 인바운드 시각 (0=아직 없음 → 스트리밍 정지)
+    # 🔋 ECO 모드 (페이블 설계 2026-08-13 밤) — 이 연결에만 적용되는 화면전송 정지 플래그.
+    #   릴레이 유령 가드(_relay_alive)와 동일한 "연결별 클로저 리스트 + 루프 스킵" 패턴 재사용.
+    _lite = [False]
 
     global _push
     # _push는 직접(Tailscale/로컬) 연결만 추적 — relay 덮어쓰기 방지
@@ -2661,9 +3123,33 @@ async def ws_endpoint(ws: WebSocket):
         _TB_LADDER = [20000, 12000, 8000, 5000]
         _tb_slow = 0
         _tb_last_step = time.time()
+        # 🛡 UAC 보안데스크톱 감시 상태 (2026-08-07 대표님 발주) — 1.5초마다 판정, 변화 순간에만 폰에 통보
+        _sd_state = False
+        _sd_last = 0.0
         while True:
             t0 = time.time()
+            # 🛡 UAC 감지 → 폰 중앙 알림 신호 (★서버 재시작 후부터 유효)
+            if t0 - _sd_last > 1.5:
+                _sd_last = t0
+                try:
+                    _sd_now = await asyncio.to_thread(secure_desktop_active)
+                    if _sd_now != _sd_state:
+                        _sd_state = _sd_now
+                        await send_json({"type": "pc_block", "on": _sd_now, "reason": "uac"})
+                        log.info(f"🛡 보안데스크톱 {'감지 → 폰 알림' if _sd_now else '해제 → 폰 알림 소거'}")
+                except Exception:
+                    pass
             interval = 1.0 / STATE.get("q_fps", LTE_FPS if STATE.get("lte") else FPS)
+            # 🛡 릴레이 유령 가드 — 릴레이 뒤 폰이 20초+ 조용하면 스트리밍 정지(캡처·인코딩·전송 스킵)
+            if _is_relay and (time.time() - _relay_alive[0] > 20):
+                await asyncio.sleep(1.0)
+                continue
+            # 🔋 ECO 모드 — 커서·터보·JPEG 전부 스킵(폰 라디오 웨이크업 0).
+            #   해제 시 깨끗한 키프레임부터 재개되도록 터보 세대를 리셋(재개 핸드셰이크 강제 — 뭉개짐 방지).
+            if _lite[0]:
+                _my_turbo_gen = -1
+                await asyncio.sleep(1.0)
+                continue
             try:
                 cur = cursor_ratio(STATE["monitor"])
                 shp = cursor_shape()
@@ -2709,7 +3195,9 @@ async def ws_endpoint(ws: WebSocket):
                             elif _tb_slow > 0:
                                 _tb_slow -= 1
                             _cur_k = STATE.get("turbo_kbps", TURBO_KBPS)
-                            if _tb_slow >= 5 and _now - _tb_last_step > 15:
+                            if _now - _t_send > 1.0 and _now - _tb_last_step > 5:
+                                _tb_slow = 99   # 🚨 1초+ 블록 = 비상 — 즉시 강하 자격
+                            if _tb_slow >= 2 and _now - _tb_last_step > 8:
                                 _low = next((k for k in _TB_LADDER if k < _cur_k), None)
                                 if _low:
                                     STATE["turbo_kbps"] = _low
@@ -2724,16 +3212,21 @@ async def ws_endpoint(ws: WebSocket):
                                     STATE["turbo_kbps"] = _up
                                     _tb_last_step = _now
                                     log.info(f"📶 회선 원활 → 터보 {_cur_k//1000}M→{_up//1000}M 승급")
-                            # 🎨 키프레임(1초 1회)마다 뷰 중심색 프로브 — 폰 캔버스 중앙과 자동 비교(줌 무관)
-                            if _is_key:
+                            # 🎨 키프레임마다 뷰 중심색 프로브 — 폰 캔버스 중앙과 자동 비교(줌 무관)
+                            # ⚖️ 제23조: 판정기준(_judge) 없으면 기동 거부 / 측정조건: 정지화면에서만
+                            # (움직이는 화면 비교 = 색이 아니라 시차 측정 → Δ16 오탐, judge 개정 2026-07-05)
+                            if (_is_key and _judge is not None
+                                    and getattr(_enc, "idle_grabs", 0) >= _judge.get("측정조건_still_grabs", 5)):
                                 _v = STATE.get("view", {})
                                 _rgb = _enc.probe_at(
                                     (_v.get("rx1", 0.0) + _v.get("rx2", 1.0)) / 2,
                                     (_v.get("ry1", 0.0) + _v.get("ry2", 1.0)) / 2)
                                 if _rgb:
                                     await send_json({"type": "turbo_probe", "rgb": _rgb})
-                    elif time.time() - _turbo_last_au > (8.0 if _turbo_wait_key else 3.0):
-                        # 첫 AU는 NVENC 세션 예열(모니터 전환 직후 1~2초+) 감안 8초 유예, 이후엔 3초
+                    elif (time.time() - _turbo_last_au > (8.0 if _turbo_wait_key else 3.0)
+                          and time.time() - getattr(_enc, "last_read", 0) > 3.0):
+                        # 가뭄 = "인코더 판독 심박까지 멎음"일 때만. GOP드랍(혼잡 시 다음 키까지 의도적 무송출)은
+                        # 가뭄이 아니다 — 04:02 심박계측: 판독 173AU 정상인데 가뭄 오판으로 터보 오살(실증)
                         # 🛟 프레임 가뭄 3초 = 인코더/캡처 고장 → 자동 JPEG 복귀 (검은화면 원천봉쇄)
                         log.warning("터보: 3초간 프레임 없음 → 자동 OFF, JPEG 복귀")
                         STATE["turbo"] = False
@@ -2822,9 +3315,24 @@ async def ws_endpoint(ws: WebSocket):
     try:
         while True:
             raw = await ws.receive_text()
+            if _is_relay:
+                _relay_alive[0] = time.time()   # 🛡 릴레이 뒤 폰이 살아있음(인바운드) → 스트리밍 재개
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
+                continue
+            # 🔋 ECO 모드 토글 + 스냅샷 1장 — 연결별 상태라 공용 handle_message가 아닌 여기서 처리.
+            if msg.get("type") == "lite":
+                _lite[0] = bool(msg.get("on"))
+                log.info(f"🔋 ECO 모드 {'ON — 화면전송 정지' if _lite[0] else 'OFF — 화면전송 재개'}")
+                continue
+            if msg.get("type") == "lite_snap":
+                try:
+                    _jpeg, _ = await asyncio.to_thread(grab_region, STATE["view"], None)  # None=변화무관 강제 1장
+                    if _jpeg is not None:
+                        await send_frame(_jpeg)
+                except Exception as _e:
+                    log.warning(f"🔋 ECO 스냅샷 실패: {_e}")
                 continue
             try:
                 resp = await handle_message(msg)
@@ -2967,17 +3475,26 @@ def main():
     # WebSocket 연결 유지 — 폰 백그라운드/LTE 약함에도 견디게 ping 간격/타임아웃 늘림
     # 포트 bind 재시도 — kill 직후 TIME_WAIT 소켓이 남아 있으면 해제될 때까지 대기
     import socket as _sock
+    import urllib.request as _ur
     for _retry in range(60):
         try:
             _s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
-            _s.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+            # [2026-07-08] REUSEADDR=1이면 점유 중에도 bind 통과(윈도우) → "비었다" 오판으로
+            # 반쪽 서버(7443만) 탄생했던 사고. 검사는 REUSEADDR 없이 정직하게.
             _s.bind(("0.0.0.0", PORT))
             _s.close()
             break
         except OSError:
             _s.close()
             if _retry == 0:
-                log.warning(f"⏳ 포트 {PORT} TIME_WAIT 대기 중...")
+                log.warning(f"⏳ 포트 {PORT} 점유 중 — 선임에게 은퇴 신호 보내며 대기...")
+            try:
+                # 👴 선임 강제 은퇴 — 늙은 주인이 관리자 권한이라 외부에서 못 죽여도,
+                # 자기 스스로는 나갈 수 있다(/restart-self). 권한 문제 원천 소멸.
+                _ur.urlopen(f"http://127.0.0.1:{PORT}/restart-self?token={TOKEN}", timeout=3)
+                log.info("👴 기존 7780 주인에게 은퇴 신호 전송")
+            except Exception:
+                pass
             time.sleep(2)
     _boot_trace("7780 bind 사전확인 통과")
     # [2026-07-03 터보] 7780 평문 + 7443 TLS(wss — 폰 WebCodecs는 보안컨텍스트 필수)를
@@ -3005,9 +3522,16 @@ def main():
                 log.warning(f"TLS({TLS_PORT}) 오류: {e} → 30초 후 재기동")
             await asyncio.sleep(30)
 
+    async def _serve_main():
+        await uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=PORT, **_kw)).serve()
+        # [2026-07-08] 7780이 죽었는데 프로세스가 7443만 물고 반쪽 생존하던 사고 →
+        # 본체가 죽으면 통째로 나간다. 경비원이 깨끗한 새 몸으로 부활시킴.
+        log.error(f"⚰ {PORT} 본체 서버 종료 → 반쪽 생존 금지, 프로세스 전체 퇴장")
+        os._exit(1)
+
     async def _serve_all():
         _boot_trace("serve_all 진입 — 7780 리스너 기동")
-        tasks = [uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=PORT, **_kw)).serve()]
+        tasks = [_serve_main()]
         if _tls_ok:
             tasks.append(_serve_tls_forever())
         await asyncio.gather(*tasks)
