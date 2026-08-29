@@ -1069,22 +1069,38 @@ class _TurboEncoder:
                 is_key = any(t == 5 for s, t in _iter_nals(au))
                 self._read_aus += 1
                 self.last_read = time.time()
+                # 🔎 [진단 2026-08-29] 3초마다 read루프 수지: 이 인코더 개체가 뭘 버리고 뭘 넣는가
+                _rdg = getattr(self, "_rdg", None) or {"put": 0, "disc": 0, "t": time.time()}
+                self._rdg = _rdg
+                if time.time() - _rdg["t"] > 3.0:
+                    log.info(f"🔎 read수지 id={id(self)%10000} put={_rdg['put']} 버림={_rdg['disc']} dropping={self._dropping} 큐={self.au_q.qsize()}")
+                    _rdg.update({"put": 0, "disc": 0, "t": time.time()})
                 if self._dropping and not is_key:
+                    _rdg["disc"] += 1
                     continue                              # 드랍 중 — P프레임 하나만 빠져도 다음 키까지 다 깨지므로 통째 스킵
                 try:
                     self.au_q.put_nowait((is_key, au))
+                    self._rdg["put"] += 1
                     self._dropping = False
                 except queue.Full:
                     self._dropping = True                 # 큐 포화(느린 소비자) → 비우고 다음 키부터 재개
                     self.drops = getattr(self, "drops", 0) + 1   # [2026-08-29 페이블] 혼잡 실측 카운터 — 적응 사다리의 눈
+                    # [2026-08-29 페이블 실측] 예전엔 큐를 통째로 비워 "아직 안 보낸 키프레임"까지 증발 —
+                    # 느린 회선에서 Full이 초당 수회 반복되며 소비자가 영원히 빈손(read수지 put>0 + 소비 0 + 큐0 실증).
+                    # 수정: 비우되 가장 최근 키 1장은 반드시 살린다 → 최악에도 키 주기(2초)마다 화면 갱신 보장.
+                    _kept_key = None
                     try:
                         while True:
-                            self.au_q.get_nowait()
+                            _k, _a = self.au_q.get_nowait()
+                            if _k:
+                                _kept_key = (_k, _a)
                     except queue.Empty:
                         pass
                     if is_key:
+                        _kept_key = (is_key, au)          # 지금 읽은 게 키면 그게 최신
+                    if _kept_key is not None:
                         try:
-                            self.au_q.put_nowait((is_key, au))
+                            self.au_q.put_nowait(_kept_key)
                             self._dropping = False
                         except queue.Full:
                             pass
@@ -3206,12 +3222,21 @@ async def ws_endpoint(ws: WebSocket):
                         await send_json({"type": "turbo_start", "w": _enc.ow, "h": _enc.oh,
                                          "fps": _enc.fps, "monitor": mss_to_win(STATE["monitor"])})
                     au = await asyncio.to_thread(_enc.get_au, 0.5)
+                    # 🔎 [진단 2026-08-29] 3초마다: 송신/먹고버림/빈손 3계수 — AU 증발 지점 확정용
+                    _dg = getattr(ws, "_dg", None) or {"sent": 0, "eaten": 0, "empty": 0, "t": time.time()}
+                    ws._dg = _dg
+                    if au is None:
+                        _dg["empty"] += 1
+                    if time.time() - _dg["t"] > 3.0:
+                        log.info(f"🔎 AU수지: 송신{_dg['sent']} 먹버{_dg['eaten']} 빈손{_dg['empty']} waitkey={_turbo_wait_key} 폴링id={id(_enc)%10000} 나={getattr(ws, 'client', '?')} relay={_is_relay} 소유주={_active_socks[-1].client if _active_socks else '없음'}")
+                        _dg.update({"sent": 0, "eaten": 0, "empty": 0, "t": time.time()})
                     if au is not None:
                         _turbo_last_au = time.time()
                         _is_key, _bytes = au
                         if _turbo_wait_key and not _is_key:
-                            pass                        # 디코더가 못 여는 P프레임 스킵
+                            _dg["eaten"] += 1           # 디코더가 못 여는 P프레임 스킵
                         else:
+                            _dg["sent"] += 1
                             _turbo_wait_key = False
                             _t_send = time.time()
                             await send_frame(b"V264" + (b"\x01" if _is_key else b"\x00") + _bytes)
