@@ -2474,7 +2474,10 @@ function connect() {
     setTimeout(() => { if (typeof window._pushAllSettings === "function") window._pushAllSettings(); }, 200);
   };
   ws.onmessage = (ev) => { lastWsMsgAt = Date.now(); onMessage(ev); };
-  ws.onclose = () => { setStatus(false); setTimeout(connect, 500); };   // 1.2s → 0.5s
+  // [2026-08-29 페이블 실측] code 4000 = 서버의 "선임 은퇴" 처형 — 내가 백그라운드일 때 은퇴당했으면
+  // 더 새 연결이 이미 있다는 뜻이라 재접속하면 안 됨(무한 상호처형 전쟁 = 줌 요요 버그의 몸통).
+  // 화면 복귀 시엔 visibilitychange 핸들러가 connect()를 다시 불러주므로 유실 없음.
+  ws.onclose = (e) => { setStatus(false); if (e && e.code === 4000 && document.hidden) return; setTimeout(connect, 500); };   // 1.2s → 0.5s
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
 
@@ -2482,6 +2485,9 @@ function connect() {
 // 화면 정지+터치 무반응(실증). 썸네일(5초 주기) 등 서버 소식이 12초 없으면 죽은 관 판정 → 강제 재접속.
 let lastWsMsgAt = Date.now();
 setInterval(() => {
+  // [2026-08-29 페이블 실측] 백그라운드(자동 ECO 중)엔 서버가 조용한 게 정상 — 이 침묵을 백신이
+  // "죽은 관"으로 오판해 3초마다 강제 재접속 전쟁(서로 4000 처형)을 일으킨 것이 줌 요요 버그의 방아쇠.
+  if (document.hidden) { lastWsMsgAt = Date.now(); return; }
   if (ws && ws.readyState === 1 && Date.now() - lastWsMsgAt > 12000) {
     lastWsMsgAt = Date.now();          // 재판정 쿨다운
     try { ws.close(); } catch (e) {}   // onclose → 0.5초 후 자동 재접속
