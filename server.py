@@ -898,6 +898,20 @@ class _TurboEncoder:
         # [2026-07-04 실측] bufsize=1프레임분(0.03초)이면 키프레임이 굶어 1초마다 연붉은 펄스(R-G 진폭 7.0).
         # 버퍼 1초 + GOP 4초 + spatial-aq → 펄스 진폭 0.0 (lab2_pulse.py 실측)
         bufsize_k = self.kbps
+        # [2026-08-29 페이블 실측] 저비트레이트에서 4K 키프레임 1장(수백KB)이 회선을 수 초 통째로 막음
+        # (1.2M 수렴 후에도 줌 2~7초 실증 — 병목이 비트레이트가 아니라 키프레임 크기였다).
+        # → 3M 이하는 인코딩 해상도를 낮춰 키프레임 자체를 작게. 캡처·커서합성·색프로브는 원본 해상도 유지.
+        if self.kbps <= 2000:
+            _tw = 1280
+        elif self.kbps <= 3000:
+            _tw = 1920
+        else:
+            _tw = self.w
+        if _tw < self.w:
+            self.ow = _tw & ~1
+            self.oh = int(self.h * _tw / self.w) & ~1
+        else:
+            self.ow, self.oh = self.w, self.h
         # [2026-07-03 색보정] RGB→YUV를 BT.709로 변환하고 스트림에 명시 태깅.
         # 무표기면 폰 디코더가 601/709를 추측 → 검정이 붉게 뜨는 색틀어짐(실증). 범위도 limited로 통일.
         # 화질: p1→p4(4090이면 4K60도 여유), baseline→high(CABAC ~15% 효율), g=1초(밀림 복구 빠르게).
@@ -906,11 +920,14 @@ class _TurboEncoder:
                "-r", str(self.fps), "-i", "pipe:0",
                # [2026-07-03 2차] limited(tv)로 보냈더니 폰 디코더가 범위깃발 무시+full 해석 → 검정 들뜸(햇빛 워시).
                # full로 인코딩하면 디코더가 어느 쪽으로 읽어도 검정=0 유지 (틀려도 하이라이트만 살짝 눌림 = 안전한 실패)
-               "-vf", "scale=out_color_matrix=bt709:out_range=full",
+               "-vf", f"scale={self.ow}:{self.oh}:out_color_matrix=bt709:out_range=full",
                "-pix_fmt", "yuv420p",
                "-color_range", "pc", "-colorspace", "bt709",
                "-color_primaries", "bt709", "-color_trc", "bt709",
                "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ull",
+               # [2026-08-29 페이블 실측] -forced-idr 없으면 nvenc 주기 키가 IDR(NAL 5) 아닌 일반 I로 나와
+               # is_key 판정 실패 → 드랍 후 "키 대기"가 영영 안 풀려 송신 0 (저비트레이트에서 실증). IDR 강제.
+               "-forced-idr", "1",
                "-profile:v", "high", "-bf", "0", "-g", str(self.fps * 2),
                "-spatial-aq", "1", "-aq-strength", "8",
                "-b:v", f"{self.kbps}k", "-maxrate", f"{self.kbps}k",
@@ -924,7 +941,7 @@ class _TurboEncoder:
                               creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
         threading.Thread(target=self._cap_loop, daemon=True).start()
         threading.Thread(target=self._read_loop, daemon=True).start()
-        log.info(f"🚀 터보 인코더 기동: {self.w}x{self.h}@{self.fps}fps {self.kbps}kbps "
+        log.info(f"🚀 터보 인코더 기동: {self.w}x{self.h}→출력{self.ow}x{self.oh}@{self.fps}fps {self.kbps}kbps "
                  f"mon=({mon['left']},{mon['top']})")
 
     def matches(self, mon: dict, fps: int, kbps: int) -> bool:
@@ -1059,6 +1076,7 @@ class _TurboEncoder:
                     self._dropping = False
                 except queue.Full:
                     self._dropping = True                 # 큐 포화(느린 소비자) → 비우고 다음 키부터 재개
+                    self.drops = getattr(self, "drops", 0) + 1   # [2026-08-29 페이블] 혼잡 실측 카운터 — 적응 사다리의 눈
                     try:
                         while True:
                             self.au_q.get_nowait()
@@ -3120,9 +3138,16 @@ async def ws_endpoint(ws: WebSocket):
         _turbo_last_au = 0.0   # 마지막 AU 수신 시각 — 3초 가뭄이면 자동 OFF(검은화면 방지)
         # 📶 적응 비트레이트 (2026-07-05) — LTE 출렁임에 20M 고정이면 몇 초씩 밀려 "먹통+새로고침" 증상.
         # 전송 0.3초+ 지연 5회 누적 → 한 단계 강하(20→12→8→5M), 90초 원활 → 한 단계 승급(사용자 상한까지)
-        _TB_LADDER = [20000, 12000, 8000, 5000]
+        # [2026-08-29 페이블 실측] 바닥 5M이 회선 실효속도보다 높으면 영구 혼잡(버퍼블로트) —
+        # 핑 1813ms 스파이크 + 터보 OFF 순간 밀린 프레임 442장 일괄 도착으로 실증. 바닥을 1.2M까지 확장.
+        _TB_LADDER = [20000, 12000, 8000, 5000, 3000, 2000, 1200]
         _tb_slow = 0
         _tb_last_step = time.time()
+        # [2026-08-29 페이블 실측] 정지화면은 AU가 초소형이라 "전송 0.3초+" 감지가 장님이 됨 —
+        # 실혼잡은 인코더 큐 넘침(P프레임 GOP드랍→키만 생존≈1fps)으로 나타남(19:55 실측).
+        # 큐 드랍 카운터 증가 = 혼잡 확정 신호로 사다리에 배선.
+        _tb_drops_seen = 0
+        _au_sent = 0   # 🔎 [진단 2026-08-29] 이 연결이 실제 송신한 AU 수 — "서버는 보내는데 폰 수신 0" 미스터리 추적
         # 🛡 UAC 보안데스크톱 감시 상태 (2026-08-07 대표님 발주) — 1.5초마다 판정, 변화 순간에만 폰에 통보
         _sd_state = False
         _sd_last = 0.0
@@ -3176,7 +3201,9 @@ async def ws_endpoint(ws: WebSocket):
                         _my_turbo_gen = _gen
                         _turbo_wait_key = True
                         _turbo_last_au = time.time()
-                        await send_json({"type": "turbo_start", "w": _enc.w, "h": _enc.h,
+                        _tb_drops_seen = 0   # 새 인코더 = 드랍 카운터 0부터 — 기준점 동기화 [2026-08-29 페이블]
+                        _au_sent = 0         # 🔎 [진단] 이 연결이 보낸 AU 수
+                        await send_json({"type": "turbo_start", "w": _enc.ow, "h": _enc.oh,
                                          "fps": _enc.fps, "monitor": mss_to_win(STATE["monitor"])})
                     au = await asyncio.to_thread(_enc.get_au, 0.5)
                     if au is not None:
@@ -3188,6 +3215,9 @@ async def ws_endpoint(ws: WebSocket):
                             _turbo_wait_key = False
                             _t_send = time.time()
                             await send_frame(b"V264" + (b"\x01" if _is_key else b"\x00") + _bytes)
+                            _au_sent += 1
+                            if _au_sent % 100 == 1:   # 🔎 [진단] ~3초마다 1줄 — 누구에게 흐르는가
+                                log.info(f"🔎 AU송신 {_au_sent}개째 → {getattr(ws, 'client', '?')} (relay={_is_relay})")
                             # 📶 적응 비트레이트 — 전송 지연으로 회선 혼잡 감지
                             _now = time.time()
                             if _now - _t_send > 0.3:
@@ -3195,6 +3225,10 @@ async def ws_endpoint(ws: WebSocket):
                             elif _tb_slow > 0:
                                 _tb_slow -= 1
                             _cur_k = STATE.get("turbo_kbps", TURBO_KBPS)
+                            _d_now = getattr(_enc, "drops", 0)
+                            if _d_now > _tb_drops_seen:
+                                _tb_drops_seen = _d_now
+                                _tb_slow = max(_tb_slow, 2)   # 큐 넘침 = 실혼잡 확정 → 즉시 강하 자격 [2026-08-29 페이블]
                             if _now - _t_send > 1.0 and _now - _tb_last_step > 5:
                                 _tb_slow = 99   # 🚨 1초+ 블록 = 비상 — 즉시 강하 자격
                             if _tb_slow >= 2 and _now - _tb_last_step > 8:
@@ -3315,12 +3349,20 @@ async def ws_endpoint(ws: WebSocket):
     try:
         while True:
             raw = await ws.receive_text()
-            if _is_relay:
-                _relay_alive[0] = time.time()   # 🛡 릴레이 뒤 폰이 살아있음(인바운드) → 스트리밍 재개
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            # 🛡 릴레이 유령가드 본질수정 [2026-08-29 페이블] — 예전엔 "모든 인바운드"가 생존 갱신이라
+            # 백그라운드 유령 탭의 자동 비콘(ping 2초·frame_report 10초)만으로 영원히 살아있음 판정,
+            # PC가 죽은 탭에 무한 송출(13:38 인코더 재기동 폭풍 실증). 자동 비콘 2종만 갱신에서 제외 —
+            # 그 외 모든 메시지(터치·휠·키·뷰 등 사용자 행위)는 기존대로 생존 갱신.
+            if _is_relay and msg.get("type") not in ("ping", "frame_report"):
+                _relay_alive[0] = time.time()
+            # 🔎 [2026-08-29 페이블 진단] 터보 ON/OFF를 "누가" 보냈는지 발신자 주소 기록 —
+            # 유령 발신 turbo_mode OFF(기본 20000kbps) 추적용. 기능 무접촉, 로그 1줄.
+            if msg.get("type") == "turbo_mode":
+                log.info(f"🔎 turbo_mode 발신자: {getattr(ws, 'client', '?')} on={msg.get('on')} kbps={msg.get('kbps', '기본')}")
             # 🔋 ECO 모드 토글 + 스냅샷 1장 — 연결별 상태라 공용 handle_message가 아닌 여기서 처리.
             if msg.get("type") == "lite":
                 _lite[0] = bool(msg.get("on"))

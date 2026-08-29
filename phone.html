@@ -1617,6 +1617,7 @@ function turboFeed(u8, isKey) {
       const codec = "avc1." + [sps[1], sps[2], sps[3]].map(b => b.toString(16).padStart(2, "0")).join("");
       vdec = new VideoDecoder({
         output: (f) => {           // VideoFrame → 기존 pendingBmp 파이프에 그대로 합류
+          window._tbErrCnt = 0;    // [2026-08-29 페이블] 정상 디코드 = 재시도 카운터 리셋 (일시 오류 3회 누적으로 세션 영구 OFF 되는 것 방지)
           if (pendingBmp) pendingBmp.close();
           pendingBmp = f;
           revealSplash();
@@ -1624,8 +1625,15 @@ function turboFeed(u8, isKey) {
         },
         error: (e) => {            // 디코더 사망 → 자동 JPEG 복귀 (안전 폴백)
           turboTeardown("터보 디코더 오류 → 일반 모드 복귀");
-          turboOn = false; localStorage.setItem("turboOn", "0");
-          sendTurboPref();
+          // [2026-08-29 페이블] 일시 오류가 사용자의 터보 선택(localStorage)을 영구 덮어쓰던 함정 제거
+          // (영속성 철칙 — 오늘 실측: 폰이 이유 없이 저속 JPEG에 갇혀 있던 진범). 세션 내 3회까지
+          // 5초 후 자동 재점화, 그 이상이면 이 세션만 포기 — 저장값은 절대 건드리지 않는다.
+          window._tbErrCnt = (window._tbErrCnt || 0) + 1;
+          if (window._tbErrCnt <= 3) {
+            setTimeout(() => { if (turboOn && turboCapable()) sendTurboPref(); }, 5000);
+          } else {
+            turboOn = false;   // 세션 한정 OFF — 다음 앱 실행 땐 저장된 사용자 선택으로 복원
+          }
           if (typeof renderTurboUI === "function") renderTurboUI();
         }
       });
@@ -2481,6 +2489,7 @@ setInterval(() => {
 }, 3000);
 // 📊 검은화면 진단 계측 (2026-07-13) — 10초마다 수신·드로우 수를 서버 로그로 자가보고
 setInterval(() => {
+  if (document.hidden) return;   // [2026-08-29 페이블] 백그라운드 탭 = 자동 비콘 정지 (유령 생존신호 차단)
   try { send({ type: "frame_report", jpeg: window._rxJpeg || 0, vid: window._rxVid || 0,
                drawn: window._drawn || 0, sched: drawScheduled, pend: !!pendingBmp,
                cv: canvasNW + "x" + canvasNH }); } catch (e) {}
@@ -2513,6 +2522,14 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     requestWakeLock();
     if (!ws || ws.readyState > 1) connect();   // 화면 다시 켜질 때 끊겨 있으면 즉시 재연결 (LTE 외부에서 끊김 복구)
+    // [2026-08-29 페이블] 숨김 중 자동 ECO였다면 원래 모드로 복귀 (pushNet이 lite 해제 통지까지 처리)
+    if (typeof lastSentMode !== "undefined" && lastSentMode === "lite" && netMode !== "lite") pushNet();
+  } else {
+    // [2026-08-29 페이블] 화면 숨김 = 즉시 자동 ECO — 서버가 캡처·인코딩·송출을 멈춰
+    // 유령 탭이 인코더·회선을 훔쳐가는 것(13:38 재기동 폭풍 실증)을 원천 차단. 사용자 설정은 무접촉.
+    if (typeof lastSentMode !== "undefined" && lastSentMode !== "lite") {
+      try { send({ type: "lite", on: true }); lastSentMode = "lite"; } catch (e) {}
+    }
   }
 });
 document.addEventListener("touchstart", requestWakeLock, { once:true, capture:true });
@@ -4907,6 +4924,7 @@ function onPong() {
   renderPing();
 }
 setInterval(() => {
+  if (document.hidden) { pingSentAt = 0; return; }   // [2026-08-29 페이블] 백그라운드 탭 = 핑 정지 (유령 생존신호 차단, 복귀 시 무응답 오판도 방지)
   if (pingSentAt) {   // 지난 ping이 2초 내 무응답 = 사실상 끊김/폭주 — 표시로 알림 (다음 pong 오면 자동 회복)
     pingRtt = 9999; pingBadStreak = Math.min(pingBadStreak + 1, 99); pingGoodStreak = 0; pingHistPush(9999); renderPing();
     if (pingBadStreak >= 2) netAlertShow("line", "📡 회선 끊김", "LTE 신호가 약해요 — 화면·터치 먹통은 회선 탓. 신호 좋은 곳으로 이동하면 자동 회복됩니다.");
