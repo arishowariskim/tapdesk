@@ -2140,7 +2140,7 @@ _push = None                       # 현재 연결된 폰으로 dict 보내는 �
 _active_socks = []                 # 🔒 살아있는 폰 WS들 (단일 폰 정책 — 새 연결 시 옛 것 닫음, 중복 스트림=깜빡임/더빨리 방지)
 
 
-OTA_VERSION = 19  # [2026-07-08] v19 = 눕지 않는 앱(에러 시 2초마다 https↔http 무한 재시도, 성공 시 리셋). aapt 검증 완료
+OTA_VERSION = 21  # [2026-08-29] v21 = 로드 워치독(5초 무응답→강제 전환) 추가, v20 = 7780 평문 폴백 차단 해제 + 7443 자가맥박 워치독
 _OTA_APK = ROOT / "app-debug.apk"
 
 @app.get("/ota/version")
@@ -3507,19 +3507,49 @@ def main():
     else:
         print("  ⚠ _ts.crt/_ts.key 없음 → TLS(7443) 생략, 평문 7780만")
 
+    async def _tls_pulse_watchdog(s2, port):
+        # [2026-08-29] Accept failed(WinError 64) 뒤 serve()가 반환을 안 해서
+        # 아래 불사조 루프가 영영 안 돌던 사고(실증) → 자기 포트에 직접 TCP 접속해
+        # 맥박을 재고, 3연속 무응답이면 should_exit로 serve()를 강제 반환시킨다.
+        await asyncio.sleep(30)
+        fails = 0
+        while True:
+            try:
+                _, w = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", port), timeout=3)
+                w.close()
+                try:
+                    await w.wait_closed()
+                except Exception:
+                    pass
+                fails = 0
+            except Exception:
+                fails += 1
+                log.warning(f"TLS({port}) 맥박확인 실패 {fails}/3")
+                if fails >= 3:
+                    log.error(f"TLS({port}) 3연속 무응답 → serve() 강제 반환시켜 재기동")
+                    s2.should_exit = True
+                    return
+            await asyncio.sleep(30)
+
     async def _serve_tls_forever():
         # [2026-07-04] 7443이 바인드 실패·소켓사고로 조용히 죽으면 v18 앱이 못 들어옴(실증)
         # → 죽어도 30초마다 부활하는 불사조 루프. 7780은 건드리지 않음.
         while True:
+            wd = None
             try:
                 s2 = uvicorn.Server(uvicorn.Config(
                     app, host="0.0.0.0", port=TLS_PORT,
                     ssl_certfile=str(_crt), ssl_keyfile=str(_key), **_kw))
                 log.info(f"🔐 TLS({TLS_PORT}) 리스너 기동")
+                wd = asyncio.create_task(_tls_pulse_watchdog(s2, TLS_PORT))
                 await s2.serve()
                 log.warning(f"TLS({TLS_PORT}) 서버 내려감 → 30초 후 재기동")
             except Exception as e:
                 log.warning(f"TLS({TLS_PORT}) 오류: {e} → 30초 후 재기동")
+            finally:
+                if wd is not None:
+                    wd.cancel()
             await asyncio.sleep(30)
 
     async def _serve_main():
