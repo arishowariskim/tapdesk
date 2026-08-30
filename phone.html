@@ -1564,6 +1564,9 @@ function flushFrame() {
     screenImg.style.transform = "";
     pinchPreview = false;
   }
+  // 🔮 [2026-08-31 페이블] 스크롤 예측 정산 — 새 프레임엔 진짜 스크롤 결과가 들어있으므로
+  // 미리 밀어둔 CSS 이동을 즉시 0으로 (예측→실물 교체). 핀치 쇼바와는 predOwn 소유권으로 격리.
+  if (predOwn) { screenImg.style.transition = "none"; screenImg.style.transform = ""; predY = 0; predOwn = false; }
 }
 
 // ───── 🚀 터보 엔진 (H.264 NVENC → WebCodecs 하드웨어 디코드) ─────
@@ -2708,6 +2711,9 @@ let t1Dir = null, t1LastY = 0;
 // [2026-08-30 페이블] 톡 모드 스크롤 3단계 속도용 — t1y(짚은 자리) 기준 "총 들어올린 거리"로 단계 결정.
 // 톡(탭클릭) 모드 전용, 패드(mouseMode) 쪽은 이 변수·블록을 아예 안 타므로 무접촉.
 let t1ScrollIv = null, t1ScrollDir = 1, t1ScrollSpeed = 1, t1ScrollFrac = 0;
+// 🔮 스크롤 예측(2026-08-31 페이블) — 휠 틱을 보낸 순간 화면을 그만큼 미리 밀어(0ms 체감) 새 프레임이
+// 도착하면 flushFrame에서 정산(transform 리셋). 예측량은 근사치라 ±140px로 캡 — 오차는 다음 프레임이 교정.
+let predY = 0, predOwn = false;
 let panX = 0, panY = 0;   // [줌아웃] z<1일 때 canvas CSS 이동량(px) — 두 손가락 드래그로 전방향 pan
 let mouseMode = localStorage.getItem("mouseMode") === "1";   // 마지막 모드 복원 (리로드 후 유지)
 let lpTimer = null, holding = false, tpActive = false;
@@ -2797,6 +2803,13 @@ screenImg.addEventListener("touchmove", (e) => {
         const MIN_MS = 260, MAX_MS = 45;
         const tick = () => {
           send({ type:"wheel", dy:t1ScrollDir, speed:t1ScrollSpeed });
+          // 🔮 예측: 보낸 틱만큼 화면을 즉시 밀어둠 (노치당 ~12px 근사) — 핀치 CSS와는 겹치지 않게 가드
+          if (!pinchActive && !pinchPreview) {
+            predY = Math.max(-140, Math.min(140, predY + t1ScrollDir * (t1ScrollSpeed / 8) * 12));
+            screenImg.style.transition = "none";
+            screenImg.style.transform = "translateY(" + predY + "px)";
+            predOwn = true;
+          }
           t1ScrollIv = setTimeout(tick, MIN_MS - t1ScrollFrac * (MIN_MS - MAX_MS));
         };
         tick();
@@ -2875,6 +2888,8 @@ screenImg.addEventListener("touchend", (e) => {
   if (mode === "1") {
     clearTimeout(lpTimer);
     if (t1ScrollIv) { clearTimeout(t1ScrollIv); t1ScrollIv = null; }   // [2026-08-30] 손 떼면 스크롤 반복 정지
+    // 🔮 예측 안전망: 손 뗀 뒤 800ms 내 새 프레임이 안 오면(정지화면 등) 밀어둔 화면을 직접 정산
+    if (predOwn) setTimeout(() => { if (predOwn && !t1ScrollIv) { screenImg.style.transition = "transform .12s ease-out"; screenImg.style.transform = ""; predY = 0; predOwn = false; } }, 800);
     if (mouseMode) {
       if (holding) {                       // 잡고 끌기 끝 → 버튼 놓음
         holding = false; send({ type:"mouse_up", button:"left" });
