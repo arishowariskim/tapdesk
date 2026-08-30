@@ -2683,7 +2683,7 @@ let mode = null, t1Start = 0, t1Moved = false, t1x = 0, t1y = 0, two = null;
 let t1Dir = null, t1LastY = 0;
 // [2026-08-30 페이블] 톡 모드 스크롤 3단계 속도용 — t1y(짚은 자리) 기준 "총 들어올린 거리"로 단계 결정.
 // 톡(탭클릭) 모드 전용, 패드(mouseMode) 쪽은 이 변수·블록을 아예 안 타므로 무접촉.
-let t1ScrollIv = null, t1ScrollTier = 0, t1ScrollDir = 1, t1ScrollSpeed = 1;
+let t1ScrollIv = null, t1ScrollDir = 1, t1ScrollSpeed = 1;
 let panX = 0, panY = 0;   // [줌아웃] z<1일 때 canvas CSS 이동량(px) — 두 손가락 드래그로 전방향 pan
 let mouseMode = localStorage.getItem("mouseMode") === "1";   // 마지막 모드 복원 (리로드 후 유지)
 let lpTimer = null, holding = false, tpActive = false;
@@ -2699,7 +2699,6 @@ screenImg.addEventListener("touchstart", (e) => {
     t1Start = Date.now(); t1Moved = false; t1x = t.clientX; t1y = t.clientY;
     t1Dir = null; t1LastY = t.clientY;   // ★한손가락 스크롤 — 매 터치마다 미확정으로 리셋
     if (t1ScrollIv) { clearInterval(t1ScrollIv); t1ScrollIv = null; }   // [2026-08-30] 새 터치 시작 = 이전 스크롤 반복 확실히 정지
-    t1ScrollTier = 0;
     if (mouseMode) {                       // 트랙패드 — 커서 안 옮김, 손가락·커서 기준점만 기록
       tpActive = true;                     // 끄는 동안 서버 커서신호 무시 (튕김 방지)
       lastFx = t.clientX; lastFy = t.clientY;
@@ -2751,22 +2750,18 @@ screenImg.addEventListener("touchmove", (e) => {
       //   화면 직접 터치는 손가락을 따라가는 자연스크롤(아래로 밀면 아래쪽 내용)을 기대한다 — 기존
       //   bindZone(레일·존 위젯)의 부호를 그대로 썼더니 반대로 느껴짐. 이 제스처만 부호 반전, 다른
       //   위젯(레일·패드·존)은 이미 대표님이 써오던 방향이라 그대로 둔다(회귀 방지).
-      // [2026-08-30 페이블] 3단계 속도로 재설계(대표님 지시) — 프레임당 순간 이동량이 아니라
-      // "짚은 자리(t1y)에서 총 얼마나 들어올렸는지"로 속도를 정한다: 조금=느리게 / 더=보통 / 훨씬=빠르게.
-      // 손가락 안 움직여도 그 높이를 유지하는 동안 인터벌로 계속 스크롤(자동반복) — 예전엔 프레임마다
-      // 손가락이 실제로 움직여야만 전송돼서 "누르고만 있기"가 안 됐던 것도 같이 해결됨.
+      // [2026-08-30 페이블] 레버형 그라데이션 속도(대표님 지시 — 3단계 대신 끊김 없이 부드럽게) —
+      // "짚은 자리(t1y)에서 총 얼마나 들어올렸는지"를 20~260px 구간에서 speed 1~20으로 선형 매핑한다.
+      // 인터벌은 고정 주기(70ms)로 딱 1개만 띄우고, 그 안에서는 매 틱마다 바깥의 살아있는
+      // t1ScrollDir·t1ScrollSpeed 값을 그대로 읽는다 — 손가락을 쥔 채 위아래로 움직이면(놓지 않아도)
+      // 다음 틱부터 바로 반영돼 레버처럼 실시간으로 부드럽게 빨라지고 느려진다.
       const lift = t1y - t.clientY;          // + = 위로 든 px, - = 아래로 내린 px (부호는 기존 규약 유지)
       const aLift = Math.abs(lift);
       t1ScrollDir = lift > 0 ? -1 : 1;
-      const tier = aLift < 70 ? 1 : (aLift < 160 ? 2 : 3);   // 1=느리게 2=보통 3=아주빠르게
-      t1ScrollSpeed = tier === 1 ? 1 : (tier === 2 ? 4 : 12);
-      if (tier !== t1ScrollTier) {                          // 단계 바뀔 때만 인터벌 재설정(불필요한 재생성 방지)
-        t1ScrollTier = tier;
-        if (t1ScrollIv) clearInterval(t1ScrollIv);
-        send({ type:"wheel", dy:t1ScrollDir, speed:t1ScrollSpeed });   // 단계 전환 즉시 1틱 선반영(체감 지연 없게)
-        const ms = tier === 1 ? 220 : (tier === 2 ? 120 : 60);         // 느릴수록 뜸하게, 빠를수록 잦게
-        t1ScrollIv = setInterval(() => send({ type:"wheel", dy:t1ScrollDir, speed:t1ScrollSpeed }), ms);
-      }
+      const MIN_LIFT = 20, MAX_LIFT = 260, MIN_SPD = 1, MAX_SPD = 20;
+      const frac = Math.min(1, Math.max(0, (aLift - MIN_LIFT) / (MAX_LIFT - MIN_LIFT)));
+      t1ScrollSpeed = MIN_SPD + frac * (MAX_SPD - MIN_SPD);
+      if (!t1ScrollIv) t1ScrollIv = setInterval(() => send({ type:"wheel", dy:t1ScrollDir, speed:t1ScrollSpeed }), 70);
       t1LastY = t.clientY;
     } else if (mouseMode) {                 // 트랙패드 — 손가락 민 만큼만 커서 상대 이동
       const v = viewRect(), L = screenLayout();
@@ -2840,7 +2835,7 @@ screenImg.addEventListener("touchend", (e) => {
   e.preventDefault();
   if (mode === "1") {
     clearTimeout(lpTimer);
-    if (t1ScrollIv) { clearInterval(t1ScrollIv); t1ScrollIv = null; t1ScrollTier = 0; }   // [2026-08-30] 손 떼면 스크롤 반복 정지
+    if (t1ScrollIv) { clearInterval(t1ScrollIv); t1ScrollIv = null; }   // [2026-08-30] 손 떼면 스크롤 반복 정지
     if (mouseMode) {
       if (holding) {                       // 잡고 끌기 끝 → 버튼 놓음
         holding = false; send({ type:"mouse_up", button:"left" });
@@ -2888,7 +2883,7 @@ screenImg.addEventListener("touchend", (e) => {
 // [2026-08-30 페이블] 터치 취소(전화옴·시스템제스처 등)로 touchend 없이 끊길 때 스크롤 반복이
 // 안 멎고 영원히 남는 것 방지 — 3단계 속도 인터벌 안전망.
 screenImg.addEventListener("touchcancel", () => {
-  if (t1ScrollIv) { clearInterval(t1ScrollIv); t1ScrollIv = null; t1ScrollTier = 0; }
+  if (t1ScrollIv) { clearInterval(t1ScrollIv); t1ScrollIv = null; }
 }, { passive:true });
 
 // ───── 도크 버튼 ─────
