@@ -2683,7 +2683,7 @@ let mode = null, t1Start = 0, t1Moved = false, t1x = 0, t1y = 0, two = null;
 let t1Dir = null, t1LastY = 0;
 // [2026-08-30 페이블] 톡 모드 스크롤 3단계 속도용 — t1y(짚은 자리) 기준 "총 들어올린 거리"로 단계 결정.
 // 톡(탭클릭) 모드 전용, 패드(mouseMode) 쪽은 이 변수·블록을 아예 안 타므로 무접촉.
-let t1ScrollIv = null, t1ScrollDir = 1, t1ScrollSpeed = 1;
+let t1ScrollIv = null, t1ScrollDir = 1, t1ScrollSpeed = 1, t1ScrollFrac = 0;
 let panX = 0, panY = 0;   // [줌아웃] z<1일 때 canvas CSS 이동량(px) — 두 손가락 드래그로 전방향 pan
 let mouseMode = localStorage.getItem("mouseMode") === "1";   // 마지막 모드 복원 (리로드 후 유지)
 let lpTimer = null, holding = false, tpActive = false;
@@ -2698,7 +2698,7 @@ screenImg.addEventListener("touchstart", (e) => {
     const t = e.touches[0];
     t1Start = Date.now(); t1Moved = false; t1x = t.clientX; t1y = t.clientY;
     t1Dir = null; t1LastY = t.clientY;   // ★한손가락 스크롤 — 매 터치마다 미확정으로 리셋
-    if (t1ScrollIv) { clearInterval(t1ScrollIv); t1ScrollIv = null; }   // [2026-08-30] 새 터치 시작 = 이전 스크롤 반복 확실히 정지
+    if (t1ScrollIv) { clearTimeout(t1ScrollIv); t1ScrollIv = null; }   // [2026-08-30] 새 터치 시작 = 이전 스크롤 반복 확실히 정지
     if (mouseMode) {                       // 트랙패드 — 커서 안 옮김, 손가락·커서 기준점만 기록
       tpActive = true;                     // 끄는 동안 서버 커서신호 무시 (튕김 방지)
       lastFx = t.clientX; lastFy = t.clientY;
@@ -2752,16 +2752,24 @@ screenImg.addEventListener("touchmove", (e) => {
       //   위젯(레일·패드·존)은 이미 대표님이 써오던 방향이라 그대로 둔다(회귀 방지).
       // [2026-08-30 페이블] 레버형 그라데이션 속도(대표님 지시 — 3단계 대신 끊김 없이 부드럽게) —
       // "짚은 자리(t1y)에서 총 얼마나 들어올렸는지"를 20~260px 구간에서 speed 1~20으로 선형 매핑한다.
-      // 인터벌은 고정 주기(70ms)로 딱 1개만 띄우고, 그 안에서는 매 틱마다 바깥의 살아있는
-      // t1ScrollDir·t1ScrollSpeed 값을 그대로 읽는다 — 손가락을 쥔 채 위아래로 움직이면(놓지 않아도)
-      // 다음 틱부터 바로 반영돼 레버처럼 실시간으로 부드럽게 빨라지고 느려진다.
+      // [2번째 수정] 크기(speed)만 부드러웠지 "얼마나 자주 보내는지"는 고정 70ms라 아주 짧은 드래그도
+      // 그 사이 여러 틱이 쌓여 점프처럼 보이던 문제(대표님 실측 신고) — 간격도 함께 그라데이션(느릴 땐
+      // 뜸하게 260ms=초당 약 4번, 빠를 땐 잦게 45ms)으로 재설계. setInterval 대신 스스로 다음 틱을
+      // 예약하는 setTimeout 체인이라 매 틱마다 그 순간의 실시간 간격·속도를 그대로 반영한다.
       const lift = t1y - t.clientY;          // + = 위로 든 px, - = 아래로 내린 px (부호는 기존 규약 유지)
       const aLift = Math.abs(lift);
       t1ScrollDir = lift > 0 ? -1 : 1;
       const MIN_LIFT = 20, MAX_LIFT = 260, MIN_SPD = 1, MAX_SPD = 20;
-      const frac = Math.min(1, Math.max(0, (aLift - MIN_LIFT) / (MAX_LIFT - MIN_LIFT)));
-      t1ScrollSpeed = MIN_SPD + frac * (MAX_SPD - MIN_SPD);
-      if (!t1ScrollIv) t1ScrollIv = setInterval(() => send({ type:"wheel", dy:t1ScrollDir, speed:t1ScrollSpeed }), 70);
+      t1ScrollFrac = Math.min(1, Math.max(0, (aLift - MIN_LIFT) / (MAX_LIFT - MIN_LIFT)));
+      t1ScrollSpeed = MIN_SPD + t1ScrollFrac * (MAX_SPD - MIN_SPD);
+      if (!t1ScrollIv) {
+        const MIN_MS = 260, MAX_MS = 45;
+        const tick = () => {
+          send({ type:"wheel", dy:t1ScrollDir, speed:t1ScrollSpeed });
+          t1ScrollIv = setTimeout(tick, MIN_MS - t1ScrollFrac * (MIN_MS - MAX_MS));
+        };
+        tick();
+      }
       t1LastY = t.clientY;
     } else if (mouseMode) {                 // 트랙패드 — 손가락 민 만큼만 커서 상대 이동
       const v = viewRect(), L = screenLayout();
@@ -2835,7 +2843,7 @@ screenImg.addEventListener("touchend", (e) => {
   e.preventDefault();
   if (mode === "1") {
     clearTimeout(lpTimer);
-    if (t1ScrollIv) { clearInterval(t1ScrollIv); t1ScrollIv = null; }   // [2026-08-30] 손 떼면 스크롤 반복 정지
+    if (t1ScrollIv) { clearTimeout(t1ScrollIv); t1ScrollIv = null; }   // [2026-08-30] 손 떼면 스크롤 반복 정지
     if (mouseMode) {
       if (holding) {                       // 잡고 끌기 끝 → 버튼 놓음
         holding = false; send({ type:"mouse_up", button:"left" });
@@ -2883,7 +2891,7 @@ screenImg.addEventListener("touchend", (e) => {
 // [2026-08-30 페이블] 터치 취소(전화옴·시스템제스처 등)로 touchend 없이 끊길 때 스크롤 반복이
 // 안 멎고 영원히 남는 것 방지 — 3단계 속도 인터벌 안전망.
 screenImg.addEventListener("touchcancel", () => {
-  if (t1ScrollIv) { clearInterval(t1ScrollIv); t1ScrollIv = null; }
+  if (t1ScrollIv) { clearTimeout(t1ScrollIv); t1ScrollIv = null; }
 }, { passive:true });
 
 // ───── 도크 버튼 ─────
