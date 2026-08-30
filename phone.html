@@ -1564,9 +1564,6 @@ function flushFrame() {
     screenImg.style.transform = "";
     pinchPreview = false;
   }
-  // 🔮 [2026-08-31 페이블] 스크롤 예측 정산 — 새 프레임엔 진짜 스크롤 결과가 들어있으므로
-  // 미리 밀어둔 CSS 이동을 즉시 0으로 (예측→실물 교체). 핀치 쇼바와는 predOwn 소유권으로 격리.
-  if (predOwn) { screenImg.style.transition = "none"; screenImg.style.transform = ""; predY = 0; predOwn = false; }
 }
 
 // ───── 🚀 터보 엔진 (H.264 NVENC → WebCodecs 하드웨어 디코드) ─────
@@ -1580,9 +1577,16 @@ let vdec = null, vdecOK = false, vdecTs = 0, turboWaitKey = false;
 
 function turboCapable() { return window.isSecureContext && typeof VideoDecoder !== "undefined"; }
 
+// 🎚 [2026-08-31 페이블] 핑 출렁임 → fps 자동 사다리 상태.
+//   _fpsEff = 지금 실제로 쓰는 fps (0=사용자 설정 그대로). 사용자 저장값(turboFps)은 절대 안 건드림
+//   (영속성 철칙 — 자동조절은 세션 한정, 상한은 항상 사용자 선택).
+//   근거(A/B 실측): 15fps=핑 50~70 안정 / 30fps=LTE 포화로 핑 294~332 출렁+줌 978ms.
+let _fpsEff = 0, _afHist = [], _afGood = 0, _afLast = 0;   // _afHist: 최근 5표본의 출렁(1)/정상(0) — 실측상 스파이크가 "연속"이 아니라 주기적(10초 1회)이라 연속카운터는 장님
+const _FPS_LADDER = [60, 30, 20, 15, 10];   // 서버 하한 10fps (server.py turbo_mode 클램프)
+
 function sendTurboPref() {         // 연결 직후·토글 변경 시 서버에 의사 전달
   if (!ws || ws.readyState !== 1) return;
-  if (turboOn && turboCapable()) send({ type:"turbo_mode", on:true, fps:turboFps, kbps:turboKbps });
+  if (turboOn && turboCapable()) send({ type:"turbo_mode", on:true, fps:(_fpsEff || turboFps), kbps:turboKbps });
   else send({ type:"turbo_mode", on:false });
 }
 
@@ -2711,9 +2715,6 @@ let t1Dir = null, t1LastY = 0;
 // [2026-08-30 페이블] 톡 모드 스크롤 3단계 속도용 — t1y(짚은 자리) 기준 "총 들어올린 거리"로 단계 결정.
 // 톡(탭클릭) 모드 전용, 패드(mouseMode) 쪽은 이 변수·블록을 아예 안 타므로 무접촉.
 let t1ScrollIv = null, t1ScrollDir = 1, t1ScrollSpeed = 1, t1ScrollFrac = 0;
-// 🔮 스크롤 예측(2026-08-31 페이블) — 휠 틱을 보낸 순간 화면을 그만큼 미리 밀어(0ms 체감) 새 프레임이
-// 도착하면 flushFrame에서 정산(transform 리셋). 예측량은 근사치라 ±140px로 캡 — 오차는 다음 프레임이 교정.
-let predY = 0, predOwn = false;
 let panX = 0, panY = 0;   // [줌아웃] z<1일 때 canvas CSS 이동량(px) — 두 손가락 드래그로 전방향 pan
 let mouseMode = localStorage.getItem("mouseMode") === "1";   // 마지막 모드 복원 (리로드 후 유지)
 let lpTimer = null, holding = false, tpActive = false;
@@ -2803,13 +2804,8 @@ screenImg.addEventListener("touchmove", (e) => {
         const MIN_MS = 260, MAX_MS = 45;
         const tick = () => {
           send({ type:"wheel", dy:t1ScrollDir, speed:t1ScrollSpeed });
-          // 🔮 예측: 보낸 틱만큼 화면을 즉시 밀어둠 (노치당 ~12px 근사) — 핀치 CSS와는 겹치지 않게 가드
-          if (!pinchActive && !pinchPreview) {
-            predY = Math.max(-140, Math.min(140, predY + t1ScrollDir * (t1ScrollSpeed / 8) * 12));
-            screenImg.style.transition = "none";
-            screenImg.style.transform = "translateY(" + predY + "px)";
-            predOwn = true;
-          }
+          // (스크롤 예측은 대표님 실사용 판정 "화면 지진"으로 2026-08-31 제거 — 예측량 근사 오차가
+          //  프레임마다 밀림→스냅백 왕복을 만들어 떨림으로 보임. 예측 없이 프레임 갱신만 사용.)
           t1ScrollIv = setTimeout(tick, MIN_MS - t1ScrollFrac * (MIN_MS - MAX_MS));
         };
         tick();
@@ -2888,8 +2884,6 @@ screenImg.addEventListener("touchend", (e) => {
   if (mode === "1") {
     clearTimeout(lpTimer);
     if (t1ScrollIv) { clearTimeout(t1ScrollIv); t1ScrollIv = null; }   // [2026-08-30] 손 떼면 스크롤 반복 정지
-    // 🔮 예측 안전망: 손 뗀 뒤 800ms 내 새 프레임이 안 오면(정지화면 등) 밀어둔 화면을 직접 정산
-    if (predOwn) setTimeout(() => { if (predOwn && !t1ScrollIv) { screenImg.style.transition = "transform .12s ease-out"; screenImg.style.transform = ""; predY = 0; predOwn = false; } }, 800);
     if (mouseMode) {
       if (holding) {                       // 잡고 끌기 끝 → 버튼 놓음
         holding = false; send({ type:"mouse_up", button:"left" });
@@ -5028,6 +5022,31 @@ setInterval(() => {
   }
   pingSentAt = performance.now();
   try { send({ type: "ping" }); } catch (e) { pingSentAt = 0; }
+  // 🎚 [2026-08-31 페이블] 핑 출렁임 → 터보 fps 자동 사다리 (2초마다 직전 RTT로 판정)
+  //   강하: 180ms 초과 2연속 + 12초 쿨다운 → 한 단계 아래로 (인코더 재기동 왕복 있으므로 신중히)
+  //   복귀: 90초(45표본) 연속 양호 + 사용자 상한 미만 → 한 단계 위로 (서버 kbps 사다리의 90초 승급과 동형)
+  if (turboOn && turboRun) {
+    const _eff = _fpsEff || turboFps;
+    // 슬라이딩 윈도우 판정 (실측 교정 2026-08-31): 스파이크가 10초 주기 1회씩이라 "연속 2회"는 영영 안 걸림
+    if (pingRtt > 0 && pingRtt < 9999) {
+      _afHist.push(pingRtt > 180 ? 1 : 0);
+      if (_afHist.length > 5) _afHist.shift();
+      // 승급 카운터(실측 교정 3회차): LTE는 망 자체 지터(10초 주기 ~370ms 1개)가 있어 "연속 무결 90초"는
+      // 영영 미달 — 완전 리셋 대신 벌점 10로 완화 (가끔 지터는 용서, 잦으면 승급 불가)
+      if (pingRtt <= 180) _afGood++; else _afGood = Math.max(0, _afGood - 10);
+    }
+    const _badN = _afHist.reduce((a, b) => a + b, 0);
+    const _n = Date.now();
+    // 이중 기준(실측 교정 2회차): 스파이크 주기(10초)=창 크기라 5중2가 또 장님 → 300ms 초과는 1회 즉시 자격
+    if ((_badN >= 2 || (pingRtt > 300 && pingRtt < 9999)) && _n - _afLast > 12000) {
+      const _dn = _FPS_LADDER.find(f => f < _eff);
+      if (_dn) { _fpsEff = _dn; _afHist = []; _afLast = _n; sendTurboPref(); toast("📶 핑 출렁 → " + _dn + "fps 자동 강하"); }
+    } else if (_afGood >= 45 && _eff < turboFps && _n - _afLast > 12000) {
+      const _ups = _FPS_LADDER.filter(f => f > _eff && f <= turboFps);
+      const _up = _ups.length ? _ups[_ups.length - 1] : null;   // 바로 위 한 단계만
+      if (_up) { _fpsEff = (_up === turboFps) ? 0 : _up; _afGood = 0; _afLast = _n; sendTurboPref(); }
+    }
+  } else if (_afHist.length || _afGood) { _afHist = []; _afGood = 0; }
 }, 2000);
 
 // ───── 줌 패널 — 마우스중심 줌(−/+) + 프리셋(1~4) ─────
@@ -6433,6 +6452,7 @@ function setTurbo(on) {
 function setTurboOpt(fps, kbps) {
   if (fps) { turboFps = fps; localStorage.setItem("turboFps", String(fps)); }
   if (kbps) { turboKbps = kbps; localStorage.setItem("turboKbps", String(kbps)); }
+  _fpsEff = 0; _afHist = []; _afGood = 0;   // 🎚 [2026-08-31] 사용자가 직접 바꾸면 자동조절 상태 리셋 — 새 선택 즉시 존중
   if (turboOn) sendTurboPref();   // 켜져 있으면 서버 인코더 즉시 재기동
   renderTurboUI();
 }
