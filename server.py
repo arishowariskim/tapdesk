@@ -3063,6 +3063,49 @@ async def ws_audio_endpoint(ws: WebSocket):
         log.info("🔊 오디오 채널 종료")
 
 
+@app.websocket("/ws-input")
+async def ws_input_endpoint(ws: WebSocket):
+    """🕹 입력 전용 채널 (2026-08-31 페이블) — 터치·커서·휠·핑을 영상 send_lock에서 완전 분리.
+    근거(오퍼스 실측): 영상·커서가 같은 send_lock을 공유해 4K 키프레임 1장이 나가는 동안
+    pong·커서까지 통째로 갇힘 — 혼잡 재현 시 같은연결 3695ms vs 연결분리 2.5ms (1478배).
+    LTE 상시 조건(대표님 확정)에서 영상이 회선을 채워도 입력만은 살아있게 하는 전용 차선.
+    /ws-audio와 같은 '별도 엔드포인트' 패턴이지만, 마우스를 주입하므로 토큰 인증은 필수."""
+    await ws.accept()
+    try:
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+        auth = json.loads(raw)
+        if auth.get("token") != TOKEN:
+            await ws.close(code=4001)
+            return
+    except Exception:
+        try:
+            await ws.close(code=4001)
+        except Exception:
+            pass
+        return
+    await ws.send_text(json.dumps({"type": "input_ok"}))
+    log.info(f"🕹 입력 채널 연결: {ws.client}")
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            try:
+                resp = await handle_message(msg)   # 기존 공용 핸들러 재사용 — 로직 무접촉
+                if resp is not None:               # pong 등 회신은 이 채널의 자체 send — 영상 락 무관
+                    await ws.send_text(json.dumps(resp, ensure_ascii=False))
+            except Exception as e:
+                log.warning(f"🕹 입력 채널 메시지 오류 ({msg.get('type')}): {e}")
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        log.info(f"🕹 입력 채널 종료: {ws.client}")
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()

@@ -2173,7 +2173,15 @@ $("captionClear").addEventListener("click", (e) => {
 function setStatus(on) {
   const d = $("dot"); if (d) d.classList.toggle("on", on);   // 우상단 lteBtn 안 dot 색만
 }
-function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+// 🕹 입력 전용 채널 상태 — 선언을 send()보다 앞에 (const TDZ는 typeof 가드조차 throw하는 함정)
+let wsInput = null;
+const INPUT_TYPES = new Set(["mouse_move","mouse_click","mouse_down","mouse_up","dbl_click","wheel","scroll","ping"]);
+function send(o) {
+  // 🕹 [2026-08-31 페이블] 지연 민감 입력(마우스·휠·핑)은 입력 전용 채널로 — 영상 혼잡과 무관한 차선.
+  //   입력 채널이 죽어있으면 기존 ws로 자동 폴백(기능 유실 0). 그 외 타입은 기존 경로 그대로(무접촉).
+  if (o && INPUT_TYPES.has(o.type) && wsInput && wsInput.readyState === 1) { wsInput.send(JSON.stringify(o)); return; }
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(o));
+}
 
 let lastUrl = null;
 let frameSeq = 0, frameShown = 0;        // 화면 프레임 순서 보장 (디코드 후 교체 시 늦은 프레임 역전 방지)
@@ -2346,7 +2354,7 @@ function onMessage(ev) {
     return;
   }
   let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-  if (m.type === "auth_ok" || m.type === "relay_ok") { setStatus(true); sendView(true); send({ type:"lte_mode", on:netLow() }); try { lastSentMode = null; pushNet(); } catch (e) {} if (sndOn) send({ type:"audio_mode", on:true }); if (clipWatch) send({ type:"clip_watch", on:true }); connectAudio(); sendTurboPref();
+  if (m.type === "auth_ok" || m.type === "relay_ok") { setStatus(true); sendView(true); send({ type:"lte_mode", on:netLow() }); try { lastSentMode = null; pushNet(); } catch (e) {} if (sndOn) send({ type:"audio_mode", on:true }); if (clipWatch) send({ type:"clip_watch", on:true }); connectAudio(); connectInput(); sendTurboPref();
     try { if (localStorage.getItem("justReloaded")) { localStorage.removeItem("justReloaded"); setTimeout(() => toast("새로고침", 4000), 700); } } catch(e) {}
     try { const _dbg = localStorage.getItem("_gsDbg"); if (_dbg) { localStorage.removeItem("_gsDbg"); const d = JSON.parse(_dbg); const _sm = scrMode(); const _zo = JSON.parse(localStorage.getItem("zOrderAll") || "{}"); const _n = _zo[_sm] !== undefined ? _zo[_sm].length : "?"; setTimeout(() => toast("📊 " + _sm + "슬롯=" + _n + " spread=" + d.n + "키 Lo저장=" + d.lo, 8000), 1400); } } catch(e) {} }   // 새로고침 직후 알림 (연결 완료 후라 안 덮임)
   else if (m.type === "restore_settings") {
@@ -2519,6 +2527,22 @@ setInterval(() => {
                drawn: window._drawn || 0, sched: drawScheduled, pend: !!pendingBmp,
                cv: canvasNW + "x" + canvasNH }); } catch (e) {}
 }, 10000);
+
+// 🕹 입력 전용 채널 (2026-08-31 페이블) — 터치·커서·휠·핑을 영상과 다른 차선으로.
+// 근거(오퍼스 실측): 영상 프레임이 send_lock을 잡는 동안 pong·커서 회신까지 갇힘 —
+// 혼잡 재현 시 같은연결 3695ms vs 연결분리 2.5ms. LTE 상시(대표님 확정)에서 체감 직결.
+// wsInput이 죽어있으면 send()가 자동으로 기존 ws로 폴백 — 기능 유실 0.
+// (wsInput·INPUT_TYPES 선언은 TDZ 함정 때문에 send() 정의 앞쪽에 있음)
+function connectInput() {
+  if (wsInput && wsInput.readyState <= 1) return;   // 이미 연결 중·완료
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const host = (new URLSearchParams(location.search).get("server")) || location.host;
+  wsInput = new WebSocket(proto + "://" + host + "/ws-input");
+  wsInput.onopen = () => { wsInput.send(JSON.stringify({ type:"auth", token:TOKEN })); };
+  wsInput.onmessage = (ev) => onMessage(ev);   // pong 등 회신 처리 재사용 — lastWsMsgAt(영상 백신)은 안 건드림
+  wsInput.onclose = () => { setTimeout(connectInput, 1500); };   // 첫 줄 가드가 이중 생성 방지
+  wsInput.onerror = () => { try { wsInput.close(); } catch (e) {} };
+}
 
 function connectAudio() {
   if (wsAud && wsAud.readyState <= 1) return;   // 이미 연결 중·완료
