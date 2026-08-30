@@ -886,7 +886,11 @@ class _TurboEncoder:
         self.kbps = int(kbps)
         self.w = mon["width"] & ~1
         self.h = mon["height"] & ~1
-        self.au_q: "queue.Queue" = queue.Queue(maxsize=8)
+        # [2026-08-31 페이블] threading.Queue → asyncio.Queue 직결 다리로 교체.
+        # 예전엔 소비자가 스레드풀(to_thread)로 0.5초 폴링 + 리더 스레드가 드레인 — 두 스레드가
+        # 큐를 놓고 경쟁하며 정지화면에서도 전달이 ~2fps에 갇힘(빈손6/3초+put>0+큐0 동시 실측의 정체).
+        # 큐 조작을 전부 이벤트루프 스레드로 모아(call_soon_threadsafe) 경쟁 자체를 소멸시킨다.
+        self.aq: "asyncio.Queue" = asyncio.Queue(maxsize=8)
         self.alive = True
         self.last_get = time.time()
         self._dropping = False   # 큐 포화로 드랍 시작 → 다음 키프레임까지 통째 스킵(참조체인 보호)
@@ -976,13 +980,48 @@ class _TurboEncoder:
                 round(float(blk[:, :, 1].mean()), 1),
                 round(float(blk[:, :, 0].mean()), 1)]
 
-    def get_au(self, timeout: float):
-        """(is_key, au_bytes) 또는 None. 소비 시각 갱신(자가종료 타이머 리셋)."""
+    async def aget(self, timeout: float):
+        """(is_key, au_bytes) 또는 None — asyncio 큐 직결(스레드풀 폴링 제거). 소비 시각 갱신(자가종료 타이머 리셋)."""
         self.last_get = time.time()
         try:
-            return self.au_q.get(True, timeout)
-        except queue.Empty:
+            return await asyncio.wait_for(self.aq.get(), timeout)
+        except asyncio.TimeoutError:
             return None
+
+    def _offer_au(self, is_key: bool, au: bytes):
+        """[2026-08-31 페이블] 리더 스레드→이벤트루프 다리의 착지점 (call_soon_threadsafe로 루프 스레드에서 실행).
+        큐 넣기·드랍·키보존이 소비자(aget)와 같은 스레드에서 돌아 레이스 원천 소멸. 드랍 정책은 기존 그대로."""
+        _bg = getattr(self, "_bdg", None) or {"put": 0, "disc": 0, "t": time.time()}
+        self._bdg = _bg
+        if time.time() - _bg["t"] > 3.0:
+            log.info(f"🔎 다리수지 id={id(self)%10000} put={_bg['put']} 버림={_bg['disc']} dropping={self._dropping} 큐={self.aq.qsize()}")
+            _bg.update({"put": 0, "disc": 0, "t": time.time()})
+        if self._dropping and not is_key:
+            _bg["disc"] += 1                      # 드랍 중 — P프레임 하나만 빠져도 다음 키까지 다 깨지므로 통째 스킵
+            return
+        try:
+            self.aq.put_nowait((is_key, au))
+            _bg["put"] += 1
+            self._dropping = False
+        except asyncio.QueueFull:
+            self._dropping = True                 # 큐 포화(느린 소비자) → 비우되 최신 키 1장은 보존
+            self.drops = getattr(self, "drops", 0) + 1   # 혼잡 실측 카운터 — 적응 사다리의 눈
+            _kept = None
+            while True:
+                try:
+                    _k, _a = self.aq.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if _k:
+                    _kept = (_k, _a)
+            if is_key:
+                _kept = (is_key, au)
+            if _kept is not None:
+                try:
+                    self.aq.put_nowait(_kept)
+                    self._dropping = False
+                except asyncio.QueueFull:
+                    pass
 
     # ── 캡처 스레드: fps 페이싱으로 풀프레임 → ffmpeg stdin ──
     def _cap_loop(self):
@@ -1033,7 +1072,7 @@ class _TurboEncoder:
                     self.proc.stdin.write(last_bytes)   # 정지화면도 재전송(비트 거의 0, fps 유지)
                     self._wrote += 1
                     if self._wrote % 90 == 0:           # 📈 심박(3초 주기) — 가뭄 단계 확정용 계측
-                        log.info(f"📈 터보 심박: 기록 {self._wrote}프레임 / 판독 {self._read_aus}AU / 큐 {self.au_q.qsize()}")
+                        log.info(f"📈 터보 심박: 기록 {self._wrote}프레임 / 판독 {self._read_aus}AU / 큐 {self.aq.qsize()}")
             except (BrokenPipeError, OSError):
                 self.alive = False
                 return
@@ -1051,7 +1090,10 @@ class _TurboEncoder:
         buf = b""
         while self.alive:
             try:
-                chunk = self.proc.stdout.read(65536)
+                # [2026-08-31 페이블 실측] read(64KB)는 64KB를 "다 채울 때까지" 블록 — 1.2Mbps에선 0.43초어치
+                # 프레임이 뭉텅이로 도착해 큐 폭발→드레인→소비자 빈손의 반복(다리수지 put13~20+빈손5 동시 실측의 정체).
+                # read1 = 도착한 만큼 즉시 반환 → AU가 생기는 즉시 한 장씩 흘러간다.
+                chunk = self.proc.stdout.read1(65536)
             except Exception:
                 break
             if not chunk:
@@ -1069,46 +1111,19 @@ class _TurboEncoder:
                 is_key = any(t == 5 for s, t in _iter_nals(au))
                 self._read_aus += 1
                 self.last_read = time.time()
-                # 🔎 [진단 2026-08-29] 3초마다 read루프 수지: 이 인코더 개체가 뭘 버리고 뭘 넣는가
-                _rdg = getattr(self, "_rdg", None) or {"put": 0, "disc": 0, "t": time.time()}
-                self._rdg = _rdg
-                if time.time() - _rdg["t"] > 3.0:
-                    log.info(f"🔎 read수지 id={id(self)%10000} put={_rdg['put']} 버림={_rdg['disc']} dropping={self._dropping} 큐={self.au_q.qsize()}")
-                    _rdg.update({"put": 0, "disc": 0, "t": time.time()})
-                if self._dropping and not is_key:
-                    _rdg["disc"] += 1
-                    continue                              # 드랍 중 — P프레임 하나만 빠져도 다음 키까지 다 깨지므로 통째 스킵
-                try:
-                    self.au_q.put_nowait((is_key, au))
-                    self._rdg["put"] += 1
-                    self._dropping = False
-                except queue.Full:
-                    self._dropping = True                 # 큐 포화(느린 소비자) → 비우고 다음 키부터 재개
-                    self.drops = getattr(self, "drops", 0) + 1   # [2026-08-29 페이블] 혼잡 실측 카운터 — 적응 사다리의 눈
-                    # [2026-08-29 페이블 실측] 예전엔 큐를 통째로 비워 "아직 안 보낸 키프레임"까지 증발 —
-                    # 느린 회선에서 Full이 초당 수회 반복되며 소비자가 영원히 빈손(read수지 put>0 + 소비 0 + 큐0 실증).
-                    # 수정: 비우되 가장 최근 키 1장은 반드시 살린다 → 최악에도 키 주기(2초)마다 화면 갱신 보장.
-                    _kept_key = None
+                # [2026-08-31 페이블] 큐 조작은 전부 루프 스레드(_offer_au)로 — 리더 스레드는 배달만
+                _lp = _EVENT_LOOP
+                if _lp is not None:
                     try:
-                        while True:
-                            _k, _a = self.au_q.get_nowait()
-                            if _k:
-                                _kept_key = (_k, _a)
-                    except queue.Empty:
-                        pass
-                    if is_key:
-                        _kept_key = (is_key, au)          # 지금 읽은 게 키면 그게 최신
-                    if _kept_key is not None:
-                        try:
-                            self.au_q.put_nowait(_kept_key)
-                            self._dropping = False
-                        except queue.Full:
-                            pass
+                        _lp.call_soon_threadsafe(self._offer_au, is_key, au)
+                    except RuntimeError:
+                        pass                              # 루프 종료 중 — 인코더도 곧 정리됨
         self.alive = False
 
 
 _turbo_enc = None          # 전역 싱글턴 (단일 사용자)
 _turbo_gen = 0             # 인코더 세대 — 폰 재연결 시 turbo_start 재전송·IDR 재기동 판단
+_EVENT_LOOP = None         # [2026-08-31 페이블] 메인 asyncio 루프 — 인코더 리더 스레드→루프 다리용 (ws_endpoint 진입 시 세팅)
 _turbo_lock = threading.Lock()   # [2026-07-03 사고] 무락 레이스로 인코더 2개 동시 기동 → 동일 dxcam 동시 grab → D3D INVALID_CALL 폭풍
 
 
@@ -1919,6 +1934,13 @@ async def handle_message(msg: dict):
         if _clip_watch:
             try: _clip_last = pyperclip.paste()   # 켤 때 현재값 = 기준선 (이후 변화만 입고)
             except Exception: _clip_last = ""
+        return None
+    if t == "clip_sync_log":       # 📋 폰이 PC 복사 텍스트를 시스템 클립보드에 반영 시도한 결과(실측 확인용)
+        via = msg.get("via", "?")
+        if msg.get("ok"):
+            log.info(f"📋 폰 시스템 클립보드 반영 성공 via={via} (len={msg.get('len')})")
+        else:
+            log.warning(f"📋 폰 시스템 클립보드 반영 실패 via={via}: {msg.get('err')}")
         return None
     if t == "ping":
         return {"type": "pong"}
@@ -3108,6 +3130,8 @@ async def ws_input_endpoint(ws: WebSocket):
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    global _EVENT_LOOP
+    _EVENT_LOOP = asyncio.get_running_loop()   # [2026-08-31 페이블] 인코더 리더 스레드→루프 다리용 (인코더는 이 루프에서만 생성됨)
     await ws.accept()
     peer = ws.client
     try:
@@ -3264,7 +3288,7 @@ async def ws_endpoint(ws: WebSocket):
                         _au_sent = 0         # 🔎 [진단] 이 연결이 보낸 AU 수
                         await send_json({"type": "turbo_start", "w": _enc.ow, "h": _enc.oh,
                                          "fps": _enc.fps, "monitor": mss_to_win(STATE["monitor"])})
-                    au = await asyncio.to_thread(_enc.get_au, 0.5)
+                    au = await _enc.aget(0.5)   # [2026-08-31 페이블] 스레드풀 폴링 → asyncio 직결 (put 즉시 깨어남)
                     # 🔎 [진단 2026-08-29] 3초마다: 송신/먹고버림/빈손 3계수 — AU 증발 지점 확정용
                     _dg = getattr(ws, "_dg", None) or {"sent": 0, "eaten": 0, "empty": 0, "t": time.time()}
                     ws._dg = _dg
